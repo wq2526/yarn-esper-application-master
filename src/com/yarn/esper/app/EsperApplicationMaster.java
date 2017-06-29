@@ -79,6 +79,7 @@ public class EsperApplicationMaster {
 	private int containerVCores;
 	// Priority of the request
 	private int requestPriority;
+	
 	private String esperEngineJarPath;
 	private String esperEngineMainClass;
 	
@@ -98,7 +99,11 @@ public class EsperApplicationMaster {
 	
 	// Launch threads
 	private List<Thread> launchThreads;
+	
+	//Kafka server host
 	private String kafkaServer;
+	
+	//event processing info
 	private String eventType;
 	private String epl;
 	private String groupId;
@@ -124,7 +129,7 @@ public class EsperApplicationMaster {
 		appMasterRpcPort = -1;
 		appMasterTrackingUrl = "";
 		
-		totalContainers = 1;
+		totalContainers = 0;
 		containerMemory = 16;
 		containerVCores = 1;
 		requestPriority = 0;
@@ -140,6 +145,7 @@ public class EsperApplicationMaster {
 		launchThreads = new ArrayList<Thread>();
 		
 		kafkaServer = "";
+		
 		eventType = "";
 		epl = "";
 		groupId = "";
@@ -163,6 +169,7 @@ public class EsperApplicationMaster {
 		opts.addOption("esper_main_class", true, "The esper main class");
 		
 		opts.addOption("kafka_server", true, "The kafka server address");
+		
 		opts.addOption("event_type", true, "The event type to be processed");
 		opts.addOption("epl", true, "The epl to process the event");
 		opts.addOption("group_id", true, "The group id of the consumer");
@@ -216,6 +223,7 @@ public class EsperApplicationMaster {
 		esperEngineMainClass = cliParser.getOptionValue("esper_main_class", "com.esper.kafka.adapters.EsperKafkaAdapters");
 		
 		kafkaServer = cliParser.getOptionValue("kafka_server", "10.109.253.127:9092");
+
 		LOG.info("get kafka server " + kafkaServer);
 		
 		eventType = cliParser.getOptionValue("event_type", "person_event");
@@ -298,6 +306,7 @@ public class EsperApplicationMaster {
 		      ContainerRequest containerReuqest = setupContainerAskForRM();
 		      amRMClient.addContainerRequest(containerReuqest);
 		}
+	
 		requestedContainers.set(totalContainers);
 	}
 	
@@ -574,7 +583,6 @@ public class EsperApplicationMaster {
 			esperClasspath.append(ApplicationConstants.CLASS_PATH_SEPARATOR);
 			esperClasspath.append(esperEngineJarPath);
 			esperEnv.put("CLASSPATH", esperClasspath.toString());
-			//esperContainer.setEnvironment(esperEnv);
 			
 			LOG.info("Complete setting up esper env " + esperClasspath.toString());
 			
@@ -599,8 +607,6 @@ public class EsperApplicationMaster {
 					", from topic " + inputTopic + 
 					", from kafka " + kafkaServer + 
 					", send processed event to " + outputTopic);
-			
-			//esperContainer.setCommands(esperCommands);
 			
 			// Set up ContainerLaunchContext, setting local resource, environment, command
 			ContainerLaunchContext esperContainer = ContainerLaunchContext.newInstance
