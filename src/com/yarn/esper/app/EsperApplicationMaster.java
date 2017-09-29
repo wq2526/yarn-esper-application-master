@@ -106,12 +106,10 @@ public class EsperApplicationMaster {
 	//event processing info
 	private String eventType;
 	private String epl;
+	private String outType;
 	private String groupId;
 	private String inputTopic;
 	private String outputTopic;
-	
-	private String eventProps;
-	private String propClasses;
 	
 	private boolean done;
 	
@@ -148,12 +146,10 @@ public class EsperApplicationMaster {
 		
 		eventType = "";
 		epl = "";
+		outType = "";
 		groupId = "";
 		inputTopic = "";
 		outputTopic = "";
-		
-		eventProps = "";
-		propClasses = "";
 		
 		opts = new Options();
 	}
@@ -172,6 +168,7 @@ public class EsperApplicationMaster {
 		
 		opts.addOption("event_type", true, "The event type to be processed");
 		opts.addOption("epl", true, "The epl to process the event");
+		opts.addOption("out_type", true, "The output event type");
 		opts.addOption("group_id", true, "The group id of the consumer");
 		opts.addOption("input_topic", true, "The topic to subscribe from kafka");
 		opts.addOption("output_topic", true, "The topic to publish to kafka");
@@ -223,14 +220,16 @@ public class EsperApplicationMaster {
 		esperEngineMainClass = cliParser.getOptionValue("esper_main_class", "com.esper.kafka.adapters.EsperKafkaAdapters");
 		
 		kafkaServer = cliParser.getOptionValue("kafka_server", "10.109.253.127:9092");
-
 		LOG.info("get kafka server " + kafkaServer);
 		
-		eventType = cliParser.getOptionValue("event_type", "person_event");
+		eventType = "\'" + cliParser.getOptionValue("event_type", "person_event") + "\'";
 		LOG.info("get event type " + eventType);
 		
 		epl = "\'" + cliParser.getOptionValue("epl", "\'select * from person_event\'") + "\'";
 		LOG.info("get epl " + epl);
+		
+		outType = cliParser.getOptionValue("out_type", "person_event");
+		LOG.info("get outType " + outType);
 		
 		groupId = cliParser.getOptionValue("group_id", "esper-group-test-id");
 		LOG.info("get group id " + groupId);
@@ -240,12 +239,6 @@ public class EsperApplicationMaster {
 		
 		outputTopic = cliParser.getOptionValue("output_topic", "esper-test-output-topic");
 		LOG.info("get output topic " + outputTopic);
-		
-		eventProps = "\'" + cliParser.getOptionValue("event_props", "\'name age\'") + "\'";
-		LOG.info("get event porps " + eventProps);
-		
-		propClasses = "\'" + cliParser.getOptionValue("prop_classes", "\'String int\'") + "\'";
-		LOG.info("get prop classes " + propClasses);
 		
 		containerMemory = Integer.parseInt(cliParser.getOptionValue("container_memory", "16"));
 		containerVCores = Integer.parseInt(cliParser.getOptionValue("container_vcores", "1"));
@@ -595,11 +588,10 @@ public class EsperApplicationMaster {
 			esperCommands.add("--kafka_server " + kafkaServer);
 			esperCommands.add("--event_type " + eventType);
 			esperCommands.add("--epl " + epl);
+			esperCommands.add("--out_type " + outType);
 			esperCommands.add("--group_id " + groupId);
 			esperCommands.add("--input_topic " + inputTopic);
 			esperCommands.add("--output_topic " + outputTopic);
-			esperCommands.add("--event_props " + eventProps);
-			esperCommands.add("--prop_classes " + propClasses);
 			//esperCommands.add("mkdir /usr/test");
 			
 			LOG.info("execute esper app with event type " + eventType + 
