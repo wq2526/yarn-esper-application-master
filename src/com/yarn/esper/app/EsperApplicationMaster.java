@@ -111,6 +111,7 @@ public class EsperApplicationMaster {
 	private String inputTopic;
 	private String outputTopic;
 	private String parents;
+	private String nodeName;
 	
 	private boolean done;
 	
@@ -152,6 +153,7 @@ public class EsperApplicationMaster {
 		inputTopic = "";
 		outputTopic = "";
 		parents = "";
+		nodeName = "";
 		
 		opts = new Options();
 	}
@@ -175,6 +177,7 @@ public class EsperApplicationMaster {
 		opts.addOption("input_topic", true, "The topic to subscribe from kafka");
 		opts.addOption("output_topic", true, "The topic to publish to kafka");
 		opts.addOption("parents", true, "The parents of the node");
+		opts.addOption("node_name", true, "The name of the node");
 		
 		CommandLine cliParser = new GnuParser().parse(opts, args);
 		
@@ -243,6 +246,9 @@ public class EsperApplicationMaster {
 		
 		parents = "\'" + cliParser.getOptionValue("parents", "") + "\'";
 		LOG.info("get parents " + parents);
+		
+		nodeName = cliParser.getOptionValue("node_name", "");
+		LOG.info("get node name " + nodeName);
 		
 		containerMemory = Integer.parseInt(cliParser.getOptionValue("container_memory", "16"));
 		containerVCores = Integer.parseInt(cliParser.getOptionValue("container_vcores", "1"));
@@ -597,6 +603,7 @@ public class EsperApplicationMaster {
 			esperCommands.add("--input_topic " + inputTopic);
 			esperCommands.add("--output_topic " + outputTopic);
 			esperCommands.add("--parents " + parents);
+			esperCommands.add("--node_name " + nodeName);
 			//esperCommands.add("mkdir /usr/test");
 			
 			LOG.info("execute esper app with event type " + eventType + 
