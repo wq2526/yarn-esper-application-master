@@ -221,7 +221,7 @@ public class EsperApplicationMaster {
 		appMasterTrackingUrl = "";
 		
 		esperEngineJarPath = cliParser.getOptionValue("esper_jar_path", "/usr/esper/apps/esper-kafka-engine.jar");
-		esperEngineMainClass = cliParser.getOptionValue("esper_main_class", "com.esper.kafka.adapters.EsperKafkaAdapters");
+		esperEngineMainClass = cliParser.getOptionValue("esper_main_class", "com.esper.kafka.adapter.EsperKafkaAdapter");
 		
 		kafkaServer = cliParser.getOptionValue("kafka_server", "10.109.253.127:9092");
 		LOG.info("get kafka server " + kafkaServer);
