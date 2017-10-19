@@ -4,8 +4,10 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.cli.CommandLine;
@@ -37,7 +39,14 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.log4j.LogManager;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
+import com.dag.api.DAG;
+import com.dag.api.Edge;
+import com.dag.api.Vertex;
+import com.runtime.api.EsperKafkaProcessor;
 import com.yarn.esper.conf.EsperConfiguration;
 
 public class EsperApplicationMaster {
@@ -83,6 +92,8 @@ public class EsperApplicationMaster {
 	private String esperEngineJarPath;
 	private String esperEngineMainClass;
 	
+	private String kafkaServer;
+	
 	// Counter for completed containers ( complete denotes successful or failed )
 	private AtomicInteger completedContainers;
 	// Allocated container count so that we know how many containers has the RM allocated to us
@@ -100,30 +111,15 @@ public class EsperApplicationMaster {
 	// Launch threads
 	private List<Thread> launchThreads;
 	
-	//Kafka server host
-	private String kafkaServer;
-	
-	//event processing info
-	private String eventType;
-	private String epl;
-	private String outType;
-	private String groupId;
-	private String inputTopic;
-	private String outputTopic;
-	private String parents;
-	private String nodeName;
+	private String nodes;
+	private DAG dag;
+	private Queue<Integer> nodesId;
 	
 	private boolean done;
 	
 	public EsperApplicationMaster() {
 		conf = new YarnConfiguration();
 		conf.setStrings(YarnConfiguration.RM_HOSTNAME, "10.109.253.145");
-		
-		containerAllocator = new ContainerAllocator();
-		amRMClient = AMRMClientAsync.createAMRMClientAsync(100, containerAllocator);
-		
-		containerListener = new ContainerListener();
-		nmClient = NMClientAsync.createNMClientAsync(containerListener);
 		
 		appMasterHostName = "";
 		appMasterRpcPort = -1;
@@ -137,6 +133,8 @@ public class EsperApplicationMaster {
 		esperEngineJarPath = "";
 		esperEngineMainClass = "";
 		
+		kafkaServer = "";
+		
 		completedContainers = new AtomicInteger();
 		allocatedContainers = new AtomicInteger();
 		failedContainers = new AtomicInteger();
@@ -144,16 +142,8 @@ public class EsperApplicationMaster {
 		
 		launchThreads = new ArrayList<Thread>();
 		
-		kafkaServer = "";
-		
-		eventType = "";
-		epl = "";
-		outType = "";
-		groupId = "";
-		inputTopic = "";
-		outputTopic = "";
-		parents = "";
-		nodeName = "";
+		nodes = "";
+		nodesId = new LinkedList<Integer>();
 		
 		opts = new Options();
 	}
@@ -162,22 +152,14 @@ public class EsperApplicationMaster {
 		
 		opts.addOption("container_memory", true, "Amount of memory in MB to be requested");
 		opts.addOption("container_vcores", true, "Amount of virtual cores to be requested");
-		opts.addOption("total_containers", true, "No. of containers on which the app needs to be executed");
 		opts.addOption("request_priority", true, "Application Priority. Default 0");
 		
 		opts.addOption("esper_jar_path", true, "The esper jar path");
 		opts.addOption("esper_main_class", true, "The esper main class");
 		
-		opts.addOption("kafka_server", true, "The kafka server address");
-		
-		opts.addOption("event_type", true, "The event type to be processed");
-		opts.addOption("epl", true, "The epl to process the event");
-		opts.addOption("out_type", true, "The output event type");
-		opts.addOption("group_id", true, "The group id of the consumer");
-		opts.addOption("input_topic", true, "The topic to subscribe from kafka");
-		opts.addOption("output_topic", true, "The topic to publish to kafka");
-		opts.addOption("parents", true, "The parents of the node");
-		opts.addOption("node_name", true, "The name of the node");
+		opts.addOption("kafka_server", true, "The kafka server");
+
+		opts.addOption("nodes", true, "The json of the nodes");
 		
 		CommandLine cliParser = new GnuParser().parse(opts, args);
 		
@@ -224,36 +206,25 @@ public class EsperApplicationMaster {
 		esperEngineMainClass = cliParser.getOptionValue("esper_main_class", "com.esper.kafka.adapter.EsperKafkaAdapter");
 		
 		kafkaServer = cliParser.getOptionValue("kafka_server", "10.109.253.127:9092");
-		LOG.info("get kafka server " + kafkaServer);
 		
-		eventType = "\'" + cliParser.getOptionValue("event_type", "person_event") + "\'";
-		LOG.info("get event type " + eventType);
-		
-		epl = "\'" + cliParser.getOptionValue("epl", "\'select * from person_event\'") + "\'";
-		LOG.info("get epl " + epl);
-		
-		outType = cliParser.getOptionValue("out_type", "person_event");
-		LOG.info("get outType " + outType);
-		
-		groupId = cliParser.getOptionValue("group_id", "esper-group-test-id");
-		LOG.info("get group id " + groupId);
-		
-		inputTopic = cliParser.getOptionValue("input_topic", "esper-test-input-topic");
-		LOG.info("get input topic " + inputTopic);
-		
-		outputTopic = cliParser.getOptionValue("output_topic", "esper-test-output-topic");
-		LOG.info("get output topic " + outputTopic);
-		
-		parents = "\'" + cliParser.getOptionValue("parents", "") + "\'";
-		LOG.info("get parents " + parents);
-		
-		nodeName = cliParser.getOptionValue("node_name", "");
-		LOG.info("get node name " + nodeName);
+		nodes = cliParser.getOptionValue("nodes", "{}")
+				.replaceAll("%", "\"").replaceAll("$", "\'");
+		LOG.info("get nodes json " + nodes);
 		
 		containerMemory = Integer.parseInt(cliParser.getOptionValue("container_memory", "16"));
 		containerVCores = Integer.parseInt(cliParser.getOptionValue("container_vcores", "1"));
-		totalContainers = Integer.parseInt(cliParser.getOptionValue("total_containers", "1"));
 		requestPriority = Integer.parseInt(cliParser.getOptionValue("request_priority", "0"));
+		
+		dag = convertToDag(nodes);
+		
+		totalContainers = nodesId.size();
+		LOG.info("totalContainer num is " + totalContainers);
+		
+		containerAllocator = new ContainerAllocator();
+		amRMClient = AMRMClientAsync.createAMRMClientAsync(100, containerAllocator);
+		
+		containerListener = new ContainerListener();
+		nmClient = NMClientAsync.createNMClientAsync(containerListener);
 		
 		return true;
 	}
@@ -293,24 +264,18 @@ public class EsperApplicationMaster {
 			containerVCores = maxVCores;
 		}
 		
-		int previousAllocatedContainers = response.getContainersFromPreviousAttempts().size();
-		LOG.info(appAttemptId + " received " + previousAllocatedContainers
-	      + " previous attempts' running containers on AM registration.");
-		allocatedContainers.addAndGet(previousAllocatedContainers);
-		
 		// Setup ask for containers from RM
 	    // Send request for containers to RM
 	    // Until we get our fully allocated quota, we keep on polling RM for
 	    // containers
 	    // Keep looping until all the containers are launched and app
 	    // executed on them ( regardless of success/failure).
-		int numContainersToRequest = totalContainers - previousAllocatedContainers;
-		for (int i = 0; i < numContainersToRequest; i++) {
-		      ContainerRequest containerReuqest = setupContainerAskForRM();
-		      amRMClient.addContainerRequest(containerReuqest);
+		requestedContainers.addAndGet(totalContainers);
+		for(int i=0;i<totalContainers;i++){
+			ContainerRequest containerReuqest = setupContainerAskForRM();
+		    amRMClient.addContainerRequest(containerReuqest);
 		}
-	
-		requestedContainers.set(totalContainers);
+		
 	}
 	
 	//Setup the request that will be sent to the RM for the container ask.
@@ -325,6 +290,59 @@ public class EsperApplicationMaster {
 		
 		LOG.info("Requested container ask: " + request.toString());
 		return request;
+	}
+	
+	private DAG convertToDag(String json) throws JSONException {
+		
+		DAG dag = DAG.create("dag");
+		
+		JSONObject jsonObject = new JSONObject(json);
+		JSONArray jsonArray = jsonObject.getJSONArray("nodes");
+		
+		for(int i=0;i<jsonArray.length();i++){
+			JSONObject nodeJson = jsonArray.getJSONObject(i);
+			int id = nodeJson.getInt("id");
+			nodesId.offer(id);
+			
+			String name = nodeJson.getString("name");
+			Vertex vertex = null;
+			if(dag.containsVertex(id)){
+				vertex = dag.getVertex(id);
+			}else{
+				vertex = Vertex.create(id);
+				dag.addVertex(vertex);
+			}	
+			vertex.setVertexName(name);
+			JSONArray children = nodeJson.getJSONArray("children");
+			for(int j=0;j<children.length();j++){
+				int cid = children.getInt(j);
+				Vertex child = null;
+				if(dag.containsVertex(cid)){
+					child = dag.getVertex(cid);
+				}else{
+					child = Vertex.create(cid);
+					dag.addVertex(child);
+				}
+				Edge edge = Edge.create(vertex, child);
+				dag.addEdge(edge);
+			}
+			
+			EsperKafkaProcessor processor = new EsperKafkaProcessor();
+			JSONArray eventTypes = nodeJson.getJSONArray("event_types");
+			processor.setEventType(eventTypes.toString());
+			
+			JSONArray epls = nodeJson.getJSONArray("epl");
+			processor.setEpl(epls.toString());
+			
+			processor.setOutType(nodeJson.getString("out_type"));
+			processor.setParallelism(nodeJson.getInt("num"));
+			
+			vertex.setProcessor(processor);
+			
+		}
+		
+		return dag;
+		
 	}
 	
 	public boolean finish() throws YarnException, IOException {
@@ -415,13 +433,19 @@ public class EsperApplicationMaster {
 			            + ", containerResourceVirtualCores"
 			            + container.getResource().getVirtualCores());
 				
-				Thread launchThread = new Thread(new LaunchContainerRunnable(container));
+				int id = 0;
+				if(!nodesId.isEmpty()){
+					id = nodesId.poll();
+					LOG.info("add node of id " + id + " to container");
+					Thread launchThread = new Thread(new LaunchContainerRunnable(container, id));
+					
+					// launch and start the container on a separate thread to keep
+			        // the main thread unblocked
+			        // as all containers may not be allocated at one go.
+					launchThreads.add(launchThread);
+					launchThread.start();
+				}
 				
-				// launch and start the container on a separate thread to keep
-		        // the main thread unblocked
-		        // as all containers may not be allocated at one go.
-				launchThreads.add(launchThread);
-				launchThread.start();
 			}
 		}
 
@@ -543,9 +567,11 @@ public class EsperApplicationMaster {
 		
 		// Allocated container
 		private Container container;
+		private int nodeId;
 		
-		public LaunchContainerRunnable(Container container) {
+		public LaunchContainerRunnable(Container container, int nodeId) {
 			this.container = container;
+			this.nodeId = nodeId;
 		}
 
 		@Override
@@ -589,6 +615,25 @@ public class EsperApplicationMaster {
 			
 			LOG.info("Complete setting up esper env " + esperClasspath.toString());
 			
+			Vertex v = dag.getVertex(nodeId);
+			String eventType = "\'" + v.getProcessor().getEventTypes()
+					.replace("\"", "%")+ "\'";
+			String epl = "\'" + v.getProcessor().getEpls().toString()
+					.replace("\"", "%").replace("\'", "$")+ "\'";
+			String outType = v.getProcessor().getOutType();
+			String nodeName = v.getVertexName();
+			StringBuilder p = new StringBuilder();
+			p.append("\'[");
+			
+			for(Edge edge : v.getInputEdges()){
+				p.append("\"").append(edge.getInputVertex().getVertexName())
+				.append("\"").append(",");
+			}
+			if(v.getInputEdges().size()==0)p.append("\"node0\"");
+			p.append("]\'");
+			
+			String parents = p.toString().replace("\"", "%");
+			
 			// Set the necessary command to execute on the allocated container
 			List<String> esperCommands = new ArrayList<String>();
 			esperCommands.add("$JAVA_HOME/bin/java");
@@ -599,18 +644,11 @@ public class EsperApplicationMaster {
 			esperCommands.add("--event_type " + eventType);
 			esperCommands.add("--epl " + epl);
 			esperCommands.add("--out_type " + outType);
-			esperCommands.add("--group_id " + groupId);
-			esperCommands.add("--input_topic " + inputTopic);
-			esperCommands.add("--output_topic " + outputTopic);
 			esperCommands.add("--parents " + parents);
 			esperCommands.add("--node_name " + nodeName);
 			//esperCommands.add("mkdir /usr/test");
 			
-			LOG.info("execute esper app with event type " + eventType + 
-					", with statement " + epl + 
-					", from topic " + inputTopic + 
-					", from kafka " + kafkaServer + 
-					", send processed event to " + outputTopic);
+			LOG.info("Completed setting up esper engine command " + esperCommands.toString());
 			
 			// Set up ContainerLaunchContext, setting local resource, environment, command
 			ContainerLaunchContext esperContainer = ContainerLaunchContext.newInstance
