@@ -94,26 +94,19 @@ public class EsperApplicationMaster {
 	
 	private String kafkaServer;
 	
-	// Counter for completed containers ( complete denotes successful or failed )
-	private AtomicInteger completedContainers;
-	// Allocated container count so that we know how many containers has the RM allocated to us
-	private AtomicInteger allocatedContainers;
 	// Count of failed containers
 	private AtomicInteger failedContainers;
-	// Count of containers already requested from the RM
-	// Needed as once requested, we should not request for containers again.
-	// Only request for more if the original requirement changes.
-	private AtomicInteger requestedContainers;
 	
 	// Command line options
 	private Options opts;
 	
 	// Launch threads
-	private List<Thread> launchThreads;
+	private Map<Integer, Thread> launchThreads;
 	
 	private String nodes;
 	private DAG dag;
-	private Queue<Integer> nodesId;
+	private List<Integer> nodesId;
+	private int point;
 	
 	private boolean done;
 	
@@ -135,15 +128,13 @@ public class EsperApplicationMaster {
 		
 		kafkaServer = "";
 		
-		completedContainers = new AtomicInteger();
-		allocatedContainers = new AtomicInteger();
 		failedContainers = new AtomicInteger();
-		requestedContainers = new AtomicInteger();
 		
-		launchThreads = new ArrayList<Thread>();
+		launchThreads = new HashMap<Integer, Thread>();
 		
 		nodes = "";
-		nodesId = new LinkedList<Integer>();
+		nodesId = new ArrayList<Integer>();
+		point = 0;
 		
 		opts = new Options();
 	}
@@ -205,7 +196,7 @@ public class EsperApplicationMaster {
 		esperEngineJarPath = cliParser.getOptionValue("esper_jar_path", "/usr/esper/apps/esper-kafka-engine.jar");
 		esperEngineMainClass = cliParser.getOptionValue("esper_main_class", "com.esper.kafka.adapter.EsperKafkaAdapter");
 		
-		kafkaServer = cliParser.getOptionValue("kafka_server", "10.109.253.127:9092");
+		kafkaServer = "\'" + cliParser.getOptionValue("kafka_server", "10.109.253.127:9092") + "\'";
 		
 		nodes = cliParser.getOptionValue("nodes", "{}")
 				.replaceAll("%", "\"").replaceAll("$", "\'");
@@ -270,7 +261,6 @@ public class EsperApplicationMaster {
 	    // containers
 	    // Keep looping until all the containers are launched and app
 	    // executed on them ( regardless of success/failure).
-		requestedContainers.addAndGet(totalContainers);
 		for(int i=0;i<totalContainers;i++){
 			ContainerRequest containerReuqest = setupContainerAskForRM();
 		    amRMClient.addContainerRequest(containerReuqest);
@@ -302,7 +292,7 @@ public class EsperApplicationMaster {
 		for(int i=0;i<jsonArray.length();i++){
 			JSONObject nodeJson = jsonArray.getJSONObject(i);
 			int id = nodeJson.getInt("id");
-			nodesId.offer(id);
+			nodesId.add(id);
 			
 			String name = nodeJson.getString("name");
 			Vertex vertex = null;
@@ -348,7 +338,7 @@ public class EsperApplicationMaster {
 	public boolean finish() throws YarnException, IOException {
 		
 		// wait for completion.
-		while(!done && (completedContainers.get()!=totalContainers)){
+		while(!done){
 			try {
 				Thread.sleep(200);
 			} catch (InterruptedException e) {
@@ -360,9 +350,9 @@ public class EsperApplicationMaster {
 		// Join all launched threads
 	    // needed for when we time out
 	    // and we need to release containers
-		for(Thread launchThread : launchThreads){
+		for(int nodeId : launchThreads.keySet()){
 			try {
-				launchThread.join();
+				launchThreads.get(nodeId).join();
 			} catch (InterruptedException e) {
 				// TODO Auto-generated catch block
 				LOG.info("Exception thrown in thread join: " + e.getMessage());
@@ -384,9 +374,7 @@ public class EsperApplicationMaster {
 		
 		if(failedContainers.get()!=0){
 			appStatus = FinalApplicationStatus.FAILED;
-			appMessage = "total: " + totalContainers 
-					+ ", completed: " + completedContainers.get()
-					+ ", allocated: " + allocatedContainers.get()
+			appMessage = "total: " + totalContainers
 					+ ", failed: " + failedContainers.get();
 			LOG.info(appMessage);
 			success = false;
@@ -421,7 +409,6 @@ public class EsperApplicationMaster {
 			LOG.info("Got response from RM for container ask, allocatedCnt="
 			          + containers.size());
 			
-			allocatedContainers.addAndGet(containers.size());
 			for(Container container : containers){
 				LOG.info("Launching app on a new container."
 			            + ", containerId=" + container.getId()
@@ -442,7 +429,7 @@ public class EsperApplicationMaster {
 					// launch and start the container on a separate thread to keep
 			        // the main thread unblocked
 			        // as all containers may not be allocated at one go.
-					launchThreads.add(launchThread);
+					launchThreads.put(id, launchThread);
 					launchThread.start();
 				}
 				
@@ -465,21 +452,16 @@ public class EsperApplicationMaster {
 				int exitStatus = containerStatus.getExitStatus();
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
 					if(exitStatus!=ContainerExitStatus.ABORTED){
-						completedContainers.incrementAndGet();
 						failedContainers.incrementAndGet();
 					}else{
-						allocatedContainers.decrementAndGet();
-						requestedContainers.decrementAndGet();
+						
 					}
 				}else{
 					LOG.info("Container completed successfully." + ", containerId="
 				              + containerStatus.getContainerId());
-					completedContainers.incrementAndGet();
 				}
 			}
 			
-			int numToRequest = totalContainers - requestedContainers.get();
-			requestedContainers.addAndGet(numToRequest);
 			for(int i=0;i<numToRequest;i++){
 				ContainerRequest containerReuqest = setupContainerAskForRM();
 				amRMClient.addContainerRequest(containerReuqest);
@@ -549,7 +531,6 @@ public class EsperApplicationMaster {
 			// TODO Auto-generated method stub
 			
 			LOG.error("Failed to start Container " + containerId);
-			completedContainers.incrementAndGet();
 			failedContainers.incrementAndGet();
 		}
 
@@ -577,6 +558,17 @@ public class EsperApplicationMaster {
 		@Override
 		public void run() {
 			// TODO Auto-generated method stub
+			
+			for(Edge edge : dag.getVertex(nodeId).getInputEdges()){
+				if(launchThreads.containsKey(edge.getInputVertex().getId())){
+					try {
+						launchThreads.get(edge.getInputVertex().getId()).join();
+					} catch (InterruptedException e) {
+						// TODO Auto-generated catch block
+						e.printStackTrace();
+					}
+				}
+			}
 			
 			LOG.info("Setting up container launch container for containerid="
 			          + container.getId());
