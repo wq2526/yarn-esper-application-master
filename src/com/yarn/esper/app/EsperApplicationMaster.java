@@ -80,8 +80,6 @@ public class EsperApplicationMaster {
 	private String appMasterTrackingUrl;
 	
 	// App Master configuration
-	// No. of containers
-	private int totalContainers;
 	// Memory to request for the container
 	private int containerMemory;
 	// VirtualCores to request for the container
@@ -96,6 +94,17 @@ public class EsperApplicationMaster {
 	
 	// Count of failed containers
 	private AtomicInteger failedContainers;
+	// No. of containers to run shell command on
+	private int totalContainers;
+	// Allocated container count so that we know how many containers has the RM
+	// allocated to us
+	private AtomicInteger allocatedContainers;
+	// Count of containers already requested from the RM
+	// Needed as once requested, we should not request for containers again.
+	// Only request for more if the original requirement changes.
+	private AtomicInteger requestedContainers;
+	// Counter for completed containers ( complete denotes successful or failed )
+	private AtomicInteger completedContainers;
 	
 	// Command line options
 	private Options opts;
@@ -103,10 +112,12 @@ public class EsperApplicationMaster {
 	// Launch threads
 	private Map<Integer, Thread> launchThreads;
 	
+	//Launched containers
+	private Map<Integer, Container> launchedContainers;
+	
 	private String nodes;
 	private DAG dag;
-	private List<Integer> nodesId;
-	private int point;
+	private Queue<Vertex> vertexQueue;
 	
 	private boolean done;
 	
@@ -118,7 +129,6 @@ public class EsperApplicationMaster {
 		appMasterRpcPort = -1;
 		appMasterTrackingUrl = "";
 		
-		totalContainers = 0;
 		containerMemory = 16;
 		containerVCores = 1;
 		requestPriority = 0;
@@ -129,12 +139,18 @@ public class EsperApplicationMaster {
 		kafkaServer = "";
 		
 		failedContainers = new AtomicInteger();
+		totalContainers = 0;
+		allocatedContainers = new AtomicInteger();
+		requestedContainers = new AtomicInteger();
+		completedContainers = new AtomicInteger();
 		
 		launchThreads = new HashMap<Integer, Thread>();
 		
+		launchedContainers = new HashMap<Integer, Container>();
+		
 		nodes = "";
-		nodesId = new ArrayList<Integer>();
-		point = 0;
+		
+		vertexQueue = new LinkedList<Vertex>();
 		
 		opts = new Options();
 	}
@@ -208,9 +224,6 @@ public class EsperApplicationMaster {
 		
 		dag = convertToDag(nodes);
 		
-		totalContainers = nodesId.size();
-		LOG.info("totalContainer num is " + totalContainers);
-		
 		containerAllocator = new ContainerAllocator();
 		amRMClient = AMRMClientAsync.createAMRMClientAsync(100, containerAllocator);
 		
@@ -266,6 +279,8 @@ public class EsperApplicationMaster {
 		    amRMClient.addContainerRequest(containerReuqest);
 		}
 		
+		requestedContainers.set(totalContainers);
+		
 	}
 	
 	//Setup the request that will be sent to the RM for the container ask.
@@ -292,7 +307,6 @@ public class EsperApplicationMaster {
 		for(int i=0;i<jsonArray.length();i++){
 			JSONObject nodeJson = jsonArray.getJSONObject(i);
 			int id = nodeJson.getInt("id");
-			nodesId.add(id);
 			
 			String name = nodeJson.getString("name");
 			Vertex vertex = null;
@@ -328,6 +342,9 @@ public class EsperApplicationMaster {
 			processor.setParallelism(nodeJson.getInt("num"));
 			
 			vertex.setProcessor(processor);
+			
+			vertexQueue.offer(vertex);
+			totalContainers++;
 			
 		}
 		
@@ -408,7 +425,7 @@ public class EsperApplicationMaster {
 			// TODO Auto-generated method stub
 			LOG.info("Got response from RM for container ask, allocatedCnt="
 			          + containers.size());
-			
+			allocatedContainers.addAndGet(containers.size());
 			for(Container container : containers){
 				LOG.info("Launching app on a new container."
 			            + ", containerId=" + container.getId()
@@ -421,16 +438,39 @@ public class EsperApplicationMaster {
 			            + container.getResource().getVirtualCores());
 				
 				int id = 0;
-				if(!nodesId.isEmpty()){
-					id = nodesId.poll();
-					LOG.info("add node of id " + id + " to container");
+				if(!vertexQueue.isEmpty()){
+					id = vertexQueue.poll().getId();
+					LOG.info("add node of id " + id + " to container " + container.getId());
 					Thread launchThread = new Thread(new LaunchContainerRunnable(container, id));
 					
 					// launch and start the container on a separate thread to keep
 			        // the main thread unblocked
 			        // as all containers may not be allocated at one go.
-					launchThreads.put(id, launchThread);
+					if(launchThreads.containsKey(id)){
+						launchThreads.replace(id, launchThread);
+					}else{
+						launchThreads.put(id, launchThread);
+					}
+					if(launchedContainers.containsKey(id)){
+						launchedContainers.replace(id, container);
+					}else{
+						launchedContainers.put(id, container);
+					}
 					launchThread.start();
+					
+					while(launchThread.getState()!=Thread.State.TERMINATED){
+						for(Edge edge : dag.getVertex(id).getOutputEdges()){
+							if(launchThreads.containsKey(edge.getOutputVertex().getId())){
+								try {
+									launchThreads.get(edge.getOutputVertex().getId()).wait();
+								} catch (InterruptedException e) {
+									// TODO Auto-generated catch block
+									e.printStackTrace();
+								}
+							}
+						}
+					}
+					
 				}
 				
 			}
@@ -442,6 +482,7 @@ public class EsperApplicationMaster {
 			LOG.info("Got response from RM for container ask, completedCnt="
 			          + containerStatuses.size());
 			
+			int numToRequest = 0;
 			for(ContainerStatus containerStatus : containerStatuses){
 				LOG.info(appAttemptId + " got container status for containerID="
 			            + containerStatus.getContainerId() + ", state="
@@ -451,23 +492,37 @@ public class EsperApplicationMaster {
 				
 				int exitStatus = containerStatus.getExitStatus();
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
-					if(exitStatus!=ContainerExitStatus.ABORTED){
-						failedContainers.incrementAndGet();
+					if(exitStatus==ContainerExitStatus.ABORTED){
+						// container was killed by framework, possibly preempted
+			            // we should re-try as the container was lost for some reason
+						for(int nodeId : launchedContainers.keySet()){
+							if(launchedContainers.get(nodeId).getId().getContainerId()
+									==containerStatus.getContainerId().getContainerId()){
+								vertexQueue.offer(dag.getVertex(nodeId));
+								break;
+							}
+						}
+						numToRequest++;
 					}else{
-						
+						// shell script failed
+			            // counts as completed
+						completedContainers.incrementAndGet();
+						failedContainers.incrementAndGet();
 					}
 				}else{
+					completedContainers.incrementAndGet();
 					LOG.info("Container completed successfully." + ", containerId="
 				              + containerStatus.getContainerId());
 				}
 			}
 			
 			for(int i=0;i<numToRequest;i++){
-				ContainerRequest containerReuqest = setupContainerAskForRM();
-				amRMClient.addContainerRequest(containerReuqest);
+				ContainerRequest containerAsk = setupContainerAskForRM();
+		        amRMClient.addContainerRequest(containerAsk);
 			}
 			
 			if(completedContainers.get()==totalContainers)done = true;
+			
 		}
 
 		@Override
@@ -531,7 +586,8 @@ public class EsperApplicationMaster {
 			// TODO Auto-generated method stub
 			
 			LOG.error("Failed to start Container " + containerId);
-			failedContainers.incrementAndGet();
+			
+			
 		}
 
 		@Override
