@@ -366,7 +366,7 @@ public class EsperApplicationMaster {
 	public boolean finish() throws YarnException, IOException {
 		
 		// wait for completion.
-		while(!done){
+		while(!done && (completedContainers.get()!=totalContainers)){
 			try {
 				Thread.sleep(200);
 			} catch (InterruptedException e) {
@@ -495,12 +495,13 @@ public class EsperApplicationMaster {
 				int exitStatus = containerStatus.getExitStatus();
 				int nodeId = 0;
 				for(int id : nodeContainers.keySet()){
-					if(nodeContainers.get(nodeId).getId().getContainerId()
+					if(nodeContainers.get(id).getId().getContainerId()
 							==containerStatus.getContainerId().getContainerId()){
 						nodeId = id;
 						break;
 					}
 				}
+				LOG.info("The node id of the container is " + nodeId);
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
 					if(exitStatus==ContainerExitStatus.ABORTED){
 						// container was killed by framework, possibly preempted
@@ -538,6 +539,7 @@ public class EsperApplicationMaster {
 		@Override
 		public void onError(Throwable arg0) {
 			// TODO Auto-generated method stub
+			LOG.info("something error on AMRMClientAsync.CallbackHandler ", arg0);
 			done = true;
 			amRMClient.stop();
 		}
@@ -590,7 +592,7 @@ public class EsperApplicationMaster {
 		public void onGetContainerStatusError(ContainerId containerId, Throwable arg1) {
 			// TODO Auto-generated method stub
 			
-			LOG.error("Failed to query the status of Container " + containerId);
+			LOG.error("Failed to query the status of Container " + containerId, arg1);
 			
 		}
 
@@ -598,7 +600,7 @@ public class EsperApplicationMaster {
 		public void onStartContainerError(ContainerId containerId, Throwable arg1) {
 			// TODO Auto-generated method stub
 			
-			LOG.error("Failed to start Container " + containerId);
+			LOG.error("Failed to start Container " + containerId, arg1);
 			completedContainers.incrementAndGet();
 			failedContainers.incrementAndGet();
 			
@@ -608,13 +610,14 @@ public class EsperApplicationMaster {
 		public void onStopContainerError(ContainerId containerId, Throwable arg1) {
 			// TODO Auto-generated method stub
 			
-			LOG.error("Failed to stop Container " + containerId);
+			LOG.error("Failed to stop Container " + containerId, arg1);
 			
 		}
 		
 	}
 	
 	public synchronized void setReady(int id) {
+		LOG.info("set node " + id + " to ready");
 		isReady.replace(id, true);
 		notifyAll();
 	}
