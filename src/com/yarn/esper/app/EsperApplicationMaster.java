@@ -127,6 +127,8 @@ public class EsperApplicationMaster {
 	
 	private boolean done;
 	
+	private boolean retry = false;//used to test retry function
+	
 	public EsperApplicationMaster() {
 		conf = new YarnConfiguration();
 		conf.setStrings(YarnConfiguration.RM_HOSTNAME, "10.109.253.145");
@@ -518,12 +520,19 @@ public class EsperApplicationMaster {
 						failedContainers.incrementAndGet();
 					}
 				}else{
-					for(Edge edge : dag.getVertex(nodeId).getOutputEdges()){
-						setReady(edge.getOutputVertex().getId());
+					if(retry){
+						vertexQueue.offer(dag.getVertex(nodeId));
+						numToRequest++;
+						retry = false;
+					}else{
+						for(Edge edge : dag.getVertex(nodeId).getOutputEdges()){
+							setReady(edge.getOutputVertex().getId());
+						}
+						completedContainers.incrementAndGet();
+						LOG.info("Container completed successfully." + ", containerId="
+					              + containerStatus.getContainerId());
 					}
-					completedContainers.incrementAndGet();
-					LOG.info("Container completed successfully." + ", containerId="
-				              + containerStatus.getContainerId());
+					
 				}
 			}
 			
