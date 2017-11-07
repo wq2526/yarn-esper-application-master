@@ -112,8 +112,14 @@ public class EsperApplicationMaster {
 	// Launch threads
 	private Map<Integer, Thread> launchThreads;
 	
+	//threads is ready to run
+	private Map<Integer, Boolean> isReady;
+	
 	//Launched containers
-	private Map<Integer, Container> launchedContainers;
+	private Map<ContainerId, Container> launchedContainers;
+	
+	//containers of every node
+	private Map<Integer, Container> nodeContainers;
 	
 	private String nodes;
 	private DAG dag;
@@ -146,7 +152,11 @@ public class EsperApplicationMaster {
 		
 		launchThreads = new HashMap<Integer, Thread>();
 		
-		launchedContainers = new HashMap<Integer, Container>();
+		isReady = new HashMap<Integer, Boolean>();
+		
+		launchedContainers = new HashMap<ContainerId, Container>();
+		
+		nodeContainers = new HashMap<Integer, Container>();
 		
 		nodes = "";
 		
@@ -344,6 +354,7 @@ public class EsperApplicationMaster {
 			vertex.setProcessor(processor);
 			
 			vertexQueue.offer(vertex);
+			isReady.put(id, false);
 			totalContainers++;
 			
 		}
@@ -451,25 +462,16 @@ public class EsperApplicationMaster {
 					}else{
 						launchThreads.put(id, launchThread);
 					}
-					if(launchedContainers.containsKey(id)){
-						launchedContainers.replace(id, container);
+					if(nodeContainers.containsKey(id)){
+						nodeContainers.replace(id, container);
 					}else{
-						launchedContainers.put(id, container);
+						nodeContainers.put(id, container);
 					}
+					launchedContainers.put(container.getId(), container);
 					launchThread.start();
 					
-					while(launchThread.getState()!=Thread.State.TERMINATED){
-						for(Edge edge : dag.getVertex(id).getOutputEdges()){
-							if(launchThreads.containsKey(edge.getOutputVertex().getId())){
-								try {
-									launchThreads.get(edge.getOutputVertex().getId()).wait();
-								} catch (InterruptedException e) {
-									// TODO Auto-generated catch block
-									e.printStackTrace();
-								}
-							}
-						}
-					}
+					if(dag.getVertex(id).getInputEdges().size()==0)
+						setReady(id);
 					
 				}
 				
@@ -491,25 +493,33 @@ public class EsperApplicationMaster {
 			            + containerStatus.getDiagnostics());
 				
 				int exitStatus = containerStatus.getExitStatus();
+				int nodeId = 0;
+				for(int id : nodeContainers.keySet()){
+					if(nodeContainers.get(nodeId).getId().getContainerId()
+							==containerStatus.getContainerId().getContainerId()){
+						nodeId = id;
+						break;
+					}
+				}
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
 					if(exitStatus==ContainerExitStatus.ABORTED){
 						// container was killed by framework, possibly preempted
 			            // we should re-try as the container was lost for some reason
-						for(int nodeId : launchedContainers.keySet()){
-							if(launchedContainers.get(nodeId).getId().getContainerId()
-									==containerStatus.getContainerId().getContainerId()){
-								vertexQueue.offer(dag.getVertex(nodeId));
-								break;
-							}
-						}
+						vertexQueue.offer(dag.getVertex(nodeId));
 						numToRequest++;
 					}else{
 						// shell script failed
 			            // counts as completed
+						for(Edge edge : dag.getVertex(nodeId).getOutputEdges()){
+							setReady(edge.getOutputVertex().getId());
+						}
 						completedContainers.incrementAndGet();
 						failedContainers.incrementAndGet();
 					}
 				}else{
+					for(Edge edge : dag.getVertex(nodeId).getOutputEdges()){
+						setReady(edge.getOutputVertex().getId());
+					}
 					completedContainers.incrementAndGet();
 					LOG.info("Container completed successfully." + ", containerId="
 				              + containerStatus.getContainerId());
@@ -553,6 +563,9 @@ public class EsperApplicationMaster {
 			// TODO Auto-generated method stub
 			
 			LOG.info("Succeeded to start Container " + containerId);
+			if(launchedContainers.size()!=0)
+				nmClient.getContainerStatusAsync(containerId, 
+						launchedContainers.get(containerId).getNodeId());
 			
 		}
 
@@ -586,7 +599,8 @@ public class EsperApplicationMaster {
 			// TODO Auto-generated method stub
 			
 			LOG.error("Failed to start Container " + containerId);
-			
+			completedContainers.incrementAndGet();
+			failedContainers.incrementAndGet();
 			
 		}
 
@@ -598,6 +612,21 @@ public class EsperApplicationMaster {
 			
 		}
 		
+	}
+	
+	public synchronized void setReady(int id) {
+		isReady.replace(id, true);
+		notifyAll();
+	}
+	
+	public synchronized void waitForReady(int id) {
+		while(!isReady.get(id))
+			try {
+				wait();
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
 	}
 	
 	private class LaunchContainerRunnable implements Runnable {
@@ -615,7 +644,7 @@ public class EsperApplicationMaster {
 		public void run() {
 			// TODO Auto-generated method stub
 			
-			for(Edge edge : dag.getVertex(nodeId).getInputEdges()){
+			/*for(Edge edge : dag.getVertex(nodeId).getInputEdges()){
 				if(launchThreads.containsKey(edge.getInputVertex().getId())){
 					try {
 						launchThreads.get(edge.getInputVertex().getId()).join();
@@ -624,7 +653,9 @@ public class EsperApplicationMaster {
 						e.printStackTrace();
 					}
 				}
-			}
+			}*/
+			
+			waitForReady(nodeId);
 			
 			LOG.info("Setting up container launch container for containerid="
 			          + container.getId());
