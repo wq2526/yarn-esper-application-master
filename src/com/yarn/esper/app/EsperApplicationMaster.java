@@ -127,7 +127,7 @@ public class EsperApplicationMaster {
 	
 	private boolean done;
 	
-	private boolean retry = false;//used to test retry function
+	//private boolean retry = false;//used to test retry function
 	
 	public EsperApplicationMaster() {
 		conf = new YarnConfiguration();
@@ -235,6 +235,8 @@ public class EsperApplicationMaster {
 		requestPriority = Integer.parseInt(cliParser.getOptionValue("request_priority", "0"));
 		
 		dag = convertToDag(nodes);
+		
+		LOG.info("the total num of containers is " + totalContainers);
 		
 		containerAllocator = new ContainerAllocator();
 		amRMClient = AMRMClientAsync.createAMRMClientAsync(100, containerAllocator);
@@ -470,10 +472,11 @@ public class EsperApplicationMaster {
 						nodeContainers.put(id, container);
 					}
 					launchedContainers.put(container.getId(), container);
-					launchThread.start();
 					
 					if(dag.getVertex(id).getInputEdges().size()==0)
 						setReady(id);
+					
+					launchThread.start();
 					
 				}
 				
@@ -520,19 +523,12 @@ public class EsperApplicationMaster {
 						failedContainers.incrementAndGet();
 					}
 				}else{
-					if(retry){
-						vertexQueue.offer(dag.getVertex(nodeId));
-						numToRequest++;
-						retry = false;
-					}else{
-						for(Edge edge : dag.getVertex(nodeId).getOutputEdges()){
-							setReady(edge.getOutputVertex().getId());
-						}
-						completedContainers.incrementAndGet();
-						LOG.info("Container completed successfully." + ", containerId="
-					              + containerStatus.getContainerId());
+					for(Edge edge : dag.getVertex(nodeId).getOutputEdges()){
+						setReady(edge.getOutputVertex().getId());
 					}
-					
+					completedContainers.incrementAndGet();
+					LOG.info("Container completed successfully." + ", containerId="
+				              + containerStatus.getContainerId());	
 				}
 			}
 			
@@ -625,13 +621,13 @@ public class EsperApplicationMaster {
 		
 	}
 	
-	public synchronized void setReady(int id) {
+	private synchronized void setReady(int id) {
 		LOG.info("set node " + id + " to ready");
 		isReady.replace(id, true);
 		notifyAll();
 	}
 	
-	public synchronized void waitForReady(int id) {
+	private synchronized void waitForReady(int id) {
 		while(!isReady.get(id))
 			try {
 				wait();
