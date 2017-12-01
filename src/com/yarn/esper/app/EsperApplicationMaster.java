@@ -113,7 +113,7 @@ public class EsperApplicationMaster {
 	private Map<Integer, Thread> launchThreads;
 	
 	//threads is ready to run
-	private Map<Integer, Boolean> isReady;
+	private Map<Integer, Boolean> isCompleted;
 	
 	//Launched containers
 	private Map<ContainerId, Container> launchedContainers;
@@ -127,7 +127,7 @@ public class EsperApplicationMaster {
 	
 	private boolean done;
 	
-	//private boolean retry = false;//used to test retry function
+	private boolean retry = true;//used to test retry function
 	
 	public EsperApplicationMaster() {
 		conf = new YarnConfiguration();
@@ -154,7 +154,7 @@ public class EsperApplicationMaster {
 		
 		launchThreads = new HashMap<Integer, Thread>();
 		
-		isReady = new HashMap<Integer, Boolean>();
+		isCompleted = new HashMap<Integer, Boolean>();
 		
 		launchedContainers = new HashMap<ContainerId, Container>();
 		
@@ -358,7 +358,7 @@ public class EsperApplicationMaster {
 			vertex.setProcessor(processor);
 			
 			vertexQueue.offer(vertex);
-			isReady.put(id, false);
+			isCompleted.put(id, false);
 			totalContainers++;
 			
 		}
@@ -473,9 +473,6 @@ public class EsperApplicationMaster {
 					}
 					launchedContainers.put(container.getId(), container);
 					
-					if(dag.getVertex(id).getInputEdges().size()==0)
-						setReady(id);
-					
 					launchThread.start();
 					
 				}
@@ -506,31 +503,29 @@ public class EsperApplicationMaster {
 						break;
 					}
 				}
-				LOG.info("The node id of the container is " + nodeId);
+				LOG.info("The node id of the completed container is " + nodeId);
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
-					if(exitStatus==ContainerExitStatus.ABORTED){
+					//if(exitStatus==ContainerExitStatus.ABORTED){
 						// container was killed by framework, possibly preempted
 			            // we should re-try as the container was lost for some reason
 						vertexQueue.offer(dag.getVertex(nodeId));
 						numToRequest++;
-					}else{
+					/*}else{
 						// shell script failed
 			            // counts as completed
-						for(Edge edge : dag.getVertex(nodeId).getOutputEdges()){
-							setReady(edge.getOutputVertex().getId());
-						}
+						setCompleted(nodeId);
 						completedContainers.incrementAndGet();
 						failedContainers.incrementAndGet();
-					}
+					}*/
 				}else{
-					for(Edge edge : dag.getVertex(nodeId).getOutputEdges()){
-						setReady(edge.getOutputVertex().getId());
-					}
+					setCompleted(nodeId);
 					completedContainers.incrementAndGet();
 					LOG.info("Container completed successfully." + ", containerId="
 				              + containerStatus.getContainerId());	
 				}
 			}
+			
+			if(numToRequest!=0)LOG.info("ask for " + numToRequest + " containers for unsuccess nodes");
 			
 			for(int i=0;i<numToRequest;i++){
 				ContainerRequest containerAsk = setupContainerAskForRM();
@@ -582,6 +577,11 @@ public class EsperApplicationMaster {
 			
 			LOG.info("Container Status: id=" + containerId + ", status=" +
 		            containerStatus);
+			if(retry){
+				nmClient.stopContainerAsync(containerId, 
+						launchedContainers.get(containerId).getNodeId());
+				retry = false;
+			}
 			
 		}
 
@@ -621,20 +621,29 @@ public class EsperApplicationMaster {
 		
 	}
 	
-	private synchronized void setReady(int id) {
-		LOG.info("set node " + id + " to ready");
-		isReady.replace(id, true);
+	private synchronized void setCompleted(int id) {
+		LOG.info("set node " + id + " to completed");
+		isCompleted.replace(id, true);
 		notifyAll();
 	}
 	
-	private synchronized void waitForReady(int id) {
-		while(!isReady.get(id))
+	private synchronized void waitForCompleted(int id) {
+		boolean wait = true;
+		while(true){
+			Vertex v = dag.getVertex(id);
+			wait = false;
+			for(Edge edge : v.getInputEdges()){
+				if(!isCompleted.get(edge.getInputVertex().getId()))
+					wait = true;
+			}
+			if(!wait)break;
 			try {
 				wait();
 			} catch (InterruptedException e) {
 				// TODO Auto-generated catch block
 				e.printStackTrace();
 			}
+		}
 	}
 	
 	private class LaunchContainerRunnable implements Runnable {
@@ -663,7 +672,7 @@ public class EsperApplicationMaster {
 				}
 			}*/
 			
-			waitForReady(nodeId);
+			waitForCompleted(nodeId);
 			
 			LOG.info("Setting up container launch container for containerid="
 			          + container.getId());
@@ -709,6 +718,19 @@ public class EsperApplicationMaster {
 					.replace("\"", "%").replace("\'", "$")+ "\'";
 			String outType = v.getProcessor().getOutType();
 			String nodeName = v.getVertexName();
+			
+			StringBuilder c = new StringBuilder();
+			c.append("\'[");
+			
+			for(Edge edge : v.getOutputEdges()){
+				c.append("\"").append(edge.getOutputVertex().getVertexName())
+				.append("\"").append(",");
+			}
+			if(v.getOutputEdges().size()==0)c.append("\"nodeend\"");
+			c.append("]\'");
+			
+			String children = c.toString().replace("\"", "%");
+			
 			StringBuilder p = new StringBuilder();
 			p.append("\'[");
 			
@@ -716,7 +738,7 @@ public class EsperApplicationMaster {
 				p.append("\"").append(edge.getInputVertex().getVertexName())
 				.append("\"").append(",");
 			}
-			if(v.getInputEdges().size()==0)p.append("\"node0\"");
+			if(v.getInputEdges().size()==0)p.append("\"nodestart\"");
 			p.append("]\'");
 			
 			String parents = p.toString().replace("\"", "%");
@@ -731,6 +753,7 @@ public class EsperApplicationMaster {
 			esperCommands.add("--event_type " + eventType);
 			esperCommands.add("--epl " + epl);
 			esperCommands.add("--out_type " + outType);
+			esperCommands.add("--children " + children);
 			esperCommands.add("--parents " + parents);
 			esperCommands.add("--node_name " + nodeName);
 			//esperCommands.add("mkdir /usr/test");
