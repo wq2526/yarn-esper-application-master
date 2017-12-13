@@ -577,11 +577,11 @@ public class EsperApplicationMaster {
 			
 			LOG.info("Container Status: id=" + containerId + ", status=" +
 		            containerStatus);
-			if(retry){
+			/*if(retry){
 				nmClient.stopContainerAsync(containerId, 
 						launchedContainers.get(containerId).getNodeId());
 				retry = false;
-			}
+			}*/
 			
 		}
 
