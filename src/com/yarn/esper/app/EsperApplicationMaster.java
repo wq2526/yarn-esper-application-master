@@ -1,13 +1,17 @@
 package com.yarn.esper.app;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.cli.CommandLine;
@@ -47,7 +51,8 @@ import com.dag.api.DAG;
 import com.dag.api.Edge;
 import com.dag.api.Vertex;
 import com.runtime.api.EsperKafkaProcessor;
-import com.yarn.esper.conf.EsperConfiguration;
+import com.yarn.conf.EsperConfiguration;
+import com.yarn.conf.MonitorConfiguration;
 
 public class EsperApplicationMaster {
 	
@@ -90,6 +95,9 @@ public class EsperApplicationMaster {
 	private String esperEngineJarPath;
 	private String esperEngineMainClass;
 	
+	private String monitorJarPath;
+	private String monitorMainClass;
+	
 	private String kafkaServer;
 	
 	// Count of failed containers
@@ -118,12 +126,14 @@ public class EsperApplicationMaster {
 	//Launched containers
 	private Map<ContainerId, Container> launchedContainers;
 	
-	//containers of every node
-	private Map<Integer, Container> nodeContainers;
+	//containers of every vertex
+	private Map<Integer, Container> vertexContainers;
 	
-	private String nodes;
+	private String vertexJson;
 	private DAG dag;
 	private Queue<Vertex> vertexQueue;
+	
+	private Set<String> nodes;
 	
 	private boolean done;
 	
@@ -144,7 +154,23 @@ public class EsperApplicationMaster {
 		esperEngineJarPath = "";
 		esperEngineMainClass = "";
 		
-		kafkaServer = "";
+		monitorJarPath = "";
+		monitorMainClass = "";
+		
+		Properties prop = new Properties();
+		InputStream input = EsperApplicationMaster.class.
+				getClassLoader().getResourceAsStream("appMaster.properties");
+		
+		try {
+			prop.load(input);
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			LOG.error("read cep properties error", e);
+		}
+		
+		String host = prop.getProperty("kafka.host");
+		String port = prop.getProperty("kafka.port");
+		kafkaServer = host + ":" + port;
 		
 		failedContainers = new AtomicInteger();
 		totalContainers = 0;
@@ -158,11 +184,13 @@ public class EsperApplicationMaster {
 		
 		launchedContainers = new HashMap<ContainerId, Container>();
 		
-		nodeContainers = new HashMap<Integer, Container>();
+		vertexContainers = new HashMap<Integer, Container>();
 		
-		nodes = "";
+		vertexJson = "";
 		
 		vertexQueue = new LinkedList<Vertex>();
+		
+		nodes = new HashSet<String>();
 		
 		opts = new Options();
 	}
@@ -175,10 +203,8 @@ public class EsperApplicationMaster {
 		
 		opts.addOption("esper_jar_path", true, "The esper jar path");
 		opts.addOption("esper_main_class", true, "The esper main class");
-		
-		opts.addOption("kafka_server", true, "The kafka server");
 
-		opts.addOption("nodes", true, "The json of the nodes");
+		opts.addOption("vertex_json", true, "The json of the vertex");
 		
 		CommandLine cliParser = new GnuParser().parse(opts, args);
 		
@@ -221,20 +247,25 @@ public class EsperApplicationMaster {
 		appMasterRpcPort = 0;
 		appMasterTrackingUrl = "";
 		
-		esperEngineJarPath = cliParser.getOptionValue("esper_jar_path", "/usr/esper/apps/esper-kafka-engine.jar");
-		esperEngineMainClass = cliParser.getOptionValue("esper_main_class", "com.esper.kafka.adapter.EsperKafkaAdapter");
+		esperEngineJarPath = cliParser.getOptionValue
+				("esper_jar_path", "/usr/esper/apps/esper-kafka-engine.jar");
+		esperEngineMainClass = cliParser.getOptionValue
+				("esper_main_class", "com.esper.kafka.adapter.EsperKafkaAdapter");
 		
-		kafkaServer = "\'" + cliParser.getOptionValue("kafka_server", "10.109.253.127:9092") + "\'";
+		monitorJarPath = cliParser.getOptionValue
+				("monitor_jar_path", "/usr/hadoop/monitor/container-resource-monitor.jar");
+		monitorMainClass = cliParser.getOptionValue
+				("monitor_main_class", "com.container.notification.ContainerNotification");
 		
-		nodes = cliParser.getOptionValue("nodes", "{}")
+		vertexJson = cliParser.getOptionValue("vertex_json", "{}")
 				.replaceAll("%", "\"").replaceAll("$", "\'");
-		LOG.info("get nodes json " + nodes);
+		LOG.info("get vertex json " + vertexJson);
 		
 		containerMemory = Integer.parseInt(cliParser.getOptionValue("container_memory", "16"));
 		containerVCores = Integer.parseInt(cliParser.getOptionValue("container_vcores", "1"));
 		requestPriority = Integer.parseInt(cliParser.getOptionValue("request_priority", "0"));
 		
-		dag = convertToDag(nodes);
+		dag = convertToDag(vertexJson);
 		
 		LOG.info("the total num of containers is " + totalContainers);
 		
@@ -311,18 +342,32 @@ public class EsperApplicationMaster {
 		return request;
 	}
 	
+	private ContainerRequest setupContainerAskForRM(String[] nodes) {
+		
+		// set the priority for the request
+		Priority pri = Priority.newInstance(requestPriority);
+		
+		// Set up resource type requirements
+		Resource capability = Resource.newInstance(containerMemory, containerVCores);
+		ContainerRequest request = new ContainerRequest(capability, nodes, null, pri);
+		
+		LOG.info("Requested container ask: " + request.toString());
+		return request;
+		
+	}
+	
 	private DAG convertToDag(String json) throws JSONException {
 		
 		DAG dag = DAG.create("dag");
 		
 		JSONObject jsonObject = new JSONObject(json);
-		JSONArray jsonArray = jsonObject.getJSONArray("nodes");
+		JSONArray jsonArray = jsonObject.getJSONArray("vertex");
 		
 		for(int i=0;i<jsonArray.length();i++){
-			JSONObject nodeJson = jsonArray.getJSONObject(i);
-			int id = nodeJson.getInt("id");
+			JSONObject vertexJson = jsonArray.getJSONObject(i);
+			int id = vertexJson.getInt("id");
 			
-			String name = nodeJson.getString("name");
+			String name = vertexJson.getString("name");
 			Vertex vertex = null;
 			if(dag.containsVertex(id)){
 				vertex = dag.getVertex(id);
@@ -331,7 +376,7 @@ public class EsperApplicationMaster {
 				dag.addVertex(vertex);
 			}	
 			vertex.setVertexName(name);
-			JSONArray children = nodeJson.getJSONArray("children");
+			JSONArray children = vertexJson.getJSONArray("children");
 			for(int j=0;j<children.length();j++){
 				int cid = children.getInt(j);
 				Vertex child = null;
@@ -346,14 +391,14 @@ public class EsperApplicationMaster {
 			}
 			
 			EsperKafkaProcessor processor = new EsperKafkaProcessor();
-			JSONArray eventTypes = nodeJson.getJSONArray("event_types");
+			JSONArray eventTypes = vertexJson.getJSONArray("event_types");
 			processor.setEventType(eventTypes.toString());
 			
-			JSONArray epls = nodeJson.getJSONArray("epl");
+			JSONArray epls = vertexJson.getJSONArray("epl");
 			processor.setEpl(epls.toString());
 			
-			processor.setOutType(nodeJson.getString("out_type"));
-			processor.setParallelism(nodeJson.getInt("num"));
+			processor.setOutType(vertexJson.getString("out_type"));
+			processor.setParallelism(1);
 			
 			vertex.setProcessor(processor);
 			
@@ -382,9 +427,9 @@ public class EsperApplicationMaster {
 		// Join all launched threads
 	    // needed for when we time out
 	    // and we need to release containers
-		for(int nodeId : launchThreads.keySet()){
+		for(int vertexId : launchThreads.keySet()){
 			try {
-				launchThreads.get(nodeId).join();
+				launchThreads.get(vertexId).join();
 			} catch (InterruptedException e) {
 				// TODO Auto-generated catch block
 				LOG.info("Exception thrown in thread join: " + e.getMessage());
@@ -455,8 +500,8 @@ public class EsperApplicationMaster {
 				int id = 0;
 				if(!vertexQueue.isEmpty()){
 					id = vertexQueue.poll().getId();
-					LOG.info("add node of id " + id + " to container " + container.getId());
-					Thread launchThread = new Thread(new LaunchContainerRunnable(container, id));
+					LOG.info("add vertex of id " + id + " to container " + container.getId());
+					Thread launchThread = new Thread(new LaunchCEPContainerRunnable(container, id));
 					
 					// launch and start the container on a separate thread to keep
 			        // the main thread unblocked
@@ -466,10 +511,10 @@ public class EsperApplicationMaster {
 					}else{
 						launchThreads.put(id, launchThread);
 					}
-					if(nodeContainers.containsKey(id)){
-						nodeContainers.replace(id, container);
+					if(vertexContainers.containsKey(id)){
+						vertexContainers.replace(id, container);
 					}else{
-						nodeContainers.put(id, container);
+						vertexContainers.put(id, container);
 					}
 					launchedContainers.put(container.getId(), container);
 					
@@ -495,37 +540,37 @@ public class EsperApplicationMaster {
 			            + containerStatus.getDiagnostics());
 				
 				int exitStatus = containerStatus.getExitStatus();
-				int nodeId = 0;
-				for(int id : nodeContainers.keySet()){
-					if(nodeContainers.get(id).getId().getContainerId()
+				int vertexId = 0;
+				for(int id : vertexContainers.keySet()){
+					if(vertexContainers.get(id).getId().getContainerId()
 							==containerStatus.getContainerId().getContainerId()){
-						nodeId = id;
+						vertexId = id;
 						break;
 					}
 				}
-				LOG.info("The node id of the completed container is " + nodeId);
+				LOG.info("The vertex id of the completed container is " + vertexId);
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
 					//if(exitStatus==ContainerExitStatus.ABORTED){
 						// container was killed by framework, possibly preempted
 			            // we should re-try as the container was lost for some reason
-						vertexQueue.offer(dag.getVertex(nodeId));
+						vertexQueue.offer(dag.getVertex(vertexId));
 						numToRequest++;
 					/*}else{
 						// shell script failed
 			            // counts as completed
-						setCompleted(nodeId);
+						setCompleted(vertexId);
 						completedContainers.incrementAndGet();
 						failedContainers.incrementAndGet();
 					}*/
 				}else{
-					setCompleted(nodeId);
+					setCompleted(vertexId);
 					completedContainers.incrementAndGet();
 					LOG.info("Container completed successfully." + ", containerId="
 				              + containerStatus.getContainerId());	
 				}
 			}
 			
-			if(numToRequest!=0)LOG.info("ask for " + numToRequest + " containers for unsuccess nodes");
+			if(numToRequest!=0)LOG.info("ask for " + numToRequest + " containers for unsuccess vertex");
 			
 			for(int i=0;i<numToRequest;i++){
 				ContainerRequest containerAsk = setupContainerAskForRM();
@@ -622,7 +667,7 @@ public class EsperApplicationMaster {
 	}
 	
 	private synchronized void setCompleted(int id) {
-		LOG.info("set node " + id + " to completed");
+		LOG.info("set vertex " + id + " to completed");
 		isCompleted.replace(id, true);
 		notifyAll();
 	}
@@ -646,22 +691,22 @@ public class EsperApplicationMaster {
 		}
 	}
 	
-	private class LaunchContainerRunnable implements Runnable {
+	private class LaunchCEPContainerRunnable implements Runnable {
 		
 		// Allocated container
 		private Container container;
-		private int nodeId;
+		private int vertexId;
 		
-		public LaunchContainerRunnable(Container container, int nodeId) {
+		public LaunchCEPContainerRunnable(Container container, int vertexId) {
 			this.container = container;
-			this.nodeId = nodeId;
+			this.vertexId = vertexId;
 		}
 
 		@Override
 		public void run() {
 			// TODO Auto-generated method stub
 			
-			/*for(Edge edge : dag.getVertex(nodeId).getInputEdges()){
+			/*for(Edge edge : dag.getVertex(vertexId).getInputEdges()){
 				if(launchThreads.containsKey(edge.getInputVertex().getId())){
 					try {
 						launchThreads.get(edge.getInputVertex().getId()).join();
@@ -672,7 +717,7 @@ public class EsperApplicationMaster {
 				}
 			}*/
 			
-			waitForCompleted(nodeId);
+			waitForCompleted(vertexId);
 			
 			LOG.info("Setting up container launch container for containerid="
 			          + container.getId());
@@ -711,13 +756,14 @@ public class EsperApplicationMaster {
 			
 			LOG.info("Complete setting up esper env " + esperClasspath.toString());
 			
-			Vertex v = dag.getVertex(nodeId);
+			
+			Vertex v = dag.getVertex(vertexId);
 			String eventType = "\'" + v.getProcessor().getEventTypes()
 					.replace("\"", "%")+ "\'";
 			String epl = "\'" + v.getProcessor().getEpls().toString()
 					.replace("\"", "%").replace("\'", "$")+ "\'";
 			String outType = v.getProcessor().getOutType();
-			String nodeName = v.getVertexName();
+			String vertexName = v.getVertexName();
 			
 			StringBuilder c = new StringBuilder();
 			c.append("\'[");
@@ -749,13 +795,12 @@ public class EsperApplicationMaster {
 			esperCommands.add("-Xmx" + containerMemory + "M");
 			esperCommands.add(esperEngineMainClass);
 			// Set params for Application Master
-			esperCommands.add("--kafka_server " + kafkaServer);
 			esperCommands.add("--event_type " + eventType);
 			esperCommands.add("--epl " + epl);
 			esperCommands.add("--out_type " + outType);
 			esperCommands.add("--children " + children);
 			esperCommands.add("--parents " + parents);
-			esperCommands.add("--node_name " + nodeName);
+			esperCommands.add("--vertex_name " + vertexName);
 			//esperCommands.add("mkdir /usr/test");
 			
 			LOG.info("Completed setting up esper engine command " + esperCommands.toString());
@@ -770,7 +815,53 @@ public class EsperApplicationMaster {
 		
 	}
 	
-	public static void main(String[] args) throws YarnException, IOException {
+	private class LaunchMonitorContainerRunnable implements Runnable {
+		
+		private Container container;
+		private int allocatedMem;
+		
+		public LaunchMonitorContainerRunnable(Container container, int allocatedMem) {
+			this.container = container;
+			this.allocatedMem = allocatedMem;
+		}
+
+		@Override
+		public void run() {
+			// TODO Auto-generated method stub
+			
+			LOG.info("Setting up container launch container for containerid="
+			          + container.getId());
+			
+			Map<String, String> monitorEnv = new HashMap<String, String>();
+			StringBuilder monitorClasspath = new StringBuilder(Environment.CLASSPATH.$());
+			monitorClasspath.append(ApplicationConstants.CLASS_PATH_SEPARATOR).append("./*");
+			monitorClasspath.append(ApplicationConstants.CLASS_PATH_SEPARATOR);
+			monitorClasspath.append(MonitorConfiguration.DEFAULT_MONITOR_APPLICATION_CLASSPATH);
+			monitorClasspath.append(ApplicationConstants.CLASS_PATH_SEPARATOR);
+			monitorClasspath.append(monitorJarPath);
+			monitorEnv.put("CLASSPATH", monitorClasspath.toString());
+			
+			LOG.info("complete setting monitor env:" + monitorClasspath.toString());
+			
+			List<String> monitorCommands = new ArrayList<String>();
+			monitorCommands.add("$JAVA_HOME/bin/java");
+			monitorCommands.add("-Xmx" + containerMemory + "M");
+			monitorCommands.add(monitorMainClass);
+			
+			monitorCommands.add("--app_id " + appAttemptId.getApplicationId().getId());
+			monitorCommands.add("--allocated_mem " + allocatedMem);
+			
+			LOG.info("complete setting monitor commands:" + monitorCommands.toString());
+			
+			ContainerLaunchContext monitorContainer = ContainerLaunchContext.newInstance
+					(null, monitorEnv, monitorCommands, null, null, null);
+			
+			nmClient.startContainerAsync(container, monitorContainer);
+		}
+		
+	}
+	
+	public static void main(String[] args) {
 		
 		boolean result = false;
 		

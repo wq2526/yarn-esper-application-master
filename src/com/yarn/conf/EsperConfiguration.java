@@ -1,4 +1,4 @@
-package com.yarn.esper.conf;
+package com.yarn.conf;
 
 import org.apache.hadoop.util.Shell;
 
