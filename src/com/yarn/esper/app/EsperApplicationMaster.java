@@ -42,6 +42,8 @@ import org.apache.hadoop.yarn.client.api.async.NMClientAsync;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.log4j.LogManager;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -50,6 +52,8 @@ import org.json.JSONObject;
 import com.dag.api.DAG;
 import com.dag.api.Edge;
 import com.dag.api.Vertex;
+import com.kafka.client.KafkaConsumerClient;
+import com.kafka.client.KafkaProducerClient;
 import com.runtime.api.EsperKafkaProcessor;
 import com.yarn.conf.EsperConfiguration;
 import com.yarn.conf.MonitorConfiguration;
@@ -118,7 +122,7 @@ public class EsperApplicationMaster {
 	private Options opts;
 	
 	// Launch threads
-	private Map<Integer, Thread> launchThreads;
+	private Map<String, Thread> launchThreads;
 	
 	//threads is ready to run
 	private Map<Integer, Boolean> isCompleted;
@@ -127,13 +131,17 @@ public class EsperApplicationMaster {
 	private Map<ContainerId, Container> launchedContainers;
 	
 	//containers of every vertex
-	private Map<Integer, Container> vertexContainers;
+	private Map<String, Integer> containerVertex;
 	
 	private String vertexJson;
 	private DAG dag;
 	private Queue<Vertex> vertexQueue;
 	
 	private Set<String> nodes;
+	private Set<String> unMonitorNodes;
+	
+	private KafkaProducerClient<String, String> producer;
+	private KafkaConsumerClient<String, String> consumer;
 	
 	private boolean done;
 	
@@ -178,19 +186,27 @@ public class EsperApplicationMaster {
 		requestedContainers = new AtomicInteger();
 		completedContainers = new AtomicInteger();
 		
-		launchThreads = new HashMap<Integer, Thread>();
+		launchThreads = new HashMap<String, Thread>();
 		
 		isCompleted = new HashMap<Integer, Boolean>();
 		
 		launchedContainers = new HashMap<ContainerId, Container>();
 		
-		vertexContainers = new HashMap<Integer, Container>();
+		containerVertex = new HashMap<String, Integer>();
 		
 		vertexJson = "";
 		
 		vertexQueue = new LinkedList<Vertex>();
 		
 		nodes = new HashSet<String>();
+		unMonitorNodes = new HashSet<String>();
+		
+		producer = new KafkaProducerClient<String, String>(kafkaServer);
+		producer.addTopic(prop.getProperty("container.id.topic"));
+		
+		String groupId = prop.getProperty("group.id");
+		consumer = new KafkaConsumerClient<String, String>(kafkaServer, groupId);
+		consumer.addTopic(prop.getProperty("container.warning.topic"));
 		
 		opts = new Options();
 	}
@@ -326,6 +342,8 @@ public class EsperApplicationMaster {
 		
 		requestedContainers.set(totalContainers);
 		
+		listenContainerWarning();
+		
 	}
 	
 	//Setup the request that will be sent to the RM for the container ask.
@@ -412,6 +430,26 @@ public class EsperApplicationMaster {
 		
 	}
 	
+	private void listenContainerWarning() {
+		
+		consumer.subscibe();
+		while(!done){
+			ConsumerRecords<String, String> records = consumer.consume();
+			for(ConsumerRecord<String, String> record : records){
+				String containerWarningMsg = record.value();
+				JSONObject containerWarningJson = new JSONObject(containerWarningMsg);
+				String containerId = containerWarningJson.getString("container_id");
+				int vertexId = containerVertex.get(containerId);
+				vertexQueue.offer(dag.getVertex(vertexId));
+				
+				ContainerRequest containerReuqest = setupContainerAskForRM();
+			    amRMClient.addContainerRequest(containerReuqest);
+			    requestedContainers.incrementAndGet();
+			}
+		}
+		
+	}
+	
 	public boolean finish() throws YarnException, IOException {
 		
 		// wait for completion.
@@ -427,9 +465,9 @@ public class EsperApplicationMaster {
 		// Join all launched threads
 	    // needed for when we time out
 	    // and we need to release containers
-		for(int vertexId : launchThreads.keySet()){
+		for(String containerId : launchThreads.keySet()){
 			try {
-				launchThreads.get(vertexId).join();
+				launchThreads.get(containerId).join();
 			} catch (InterruptedException e) {
 				// TODO Auto-generated catch block
 				LOG.info("Exception thrown in thread join: " + e.getMessage());
@@ -487,9 +525,10 @@ public class EsperApplicationMaster {
 			          + containers.size());
 			allocatedContainers.addAndGet(containers.size());
 			for(Container container : containers){
+				String nodeHost = container.getNodeId().getHost();
 				LOG.info("Launching app on a new container."
 			            + ", containerId=" + container.getId()
-			            + ", containerNode=" + container.getNodeId().getHost()
+			            + ", containerNode=" + nodeHost
 			            + ":" + container.getNodeId().getPort()
 			            + ", containerNodeURI=" + container.getNodeHttpAddress()
 			            + ", containerResourceMemory"
@@ -497,29 +536,42 @@ public class EsperApplicationMaster {
 			            + ", containerResourceVirtualCores"
 			            + container.getResource().getVirtualCores());
 				
-				int id = 0;
+				if(!nodes.contains(nodeHost)){
+					nodes.add(nodeHost);
+					unMonitorNodes.add(nodeHost);
+					LOG.info("add cluster node:" + nodeHost);
+					
+					ContainerRequest containerReuqest = setupContainerAskForRM(new String[]{nodeHost});
+				    amRMClient.addContainerRequest(containerReuqest);
+				    requestedContainers.incrementAndGet();
+				    LOG.info("ask for a container to monitor the containers on node " + nodeHost);
+				}
+				
+				int vertexId = 0;
 				if(!vertexQueue.isEmpty()){
-					id = vertexQueue.poll().getId();
-					LOG.info("add vertex of id " + id + " to container " + container.getId());
-					Thread launchThread = new Thread(new LaunchCEPContainerRunnable(container, id));
+					vertexId = vertexQueue.poll().getId();
+					LOG.info("add vertex of id " + vertexId + " to container " + container.getId());
+					Thread launchThread = new Thread(new LaunchCEPContainerRunnable(container, vertexId));
 					
 					// launch and start the container on a separate thread to keep
 			        // the main thread unblocked
 			        // as all containers may not be allocated at one go.
-					if(launchThreads.containsKey(id)){
-						launchThreads.replace(id, launchThread);
-					}else{
-						launchThreads.put(id, launchThread);
-					}
-					if(vertexContainers.containsKey(id)){
-						vertexContainers.replace(id, container);
-					}else{
-						vertexContainers.put(id, container);
-					}
+					launchThreads.put(container.getId().toString(), launchThread);
+					containerVertex.put(container.getId().toString(), vertexId);
 					launchedContainers.put(container.getId(), container);
 					
-					launchThread.start();
+					producer.produce(null, "{\"container_id\":\"" + container.getId().toString() + "\"}" );
 					
+					launchThread.start();	
+				}else{
+					if(unMonitorNodes.size()!=0){
+						LOG.info("start monitor of node " + nodeHost + " with container " + container.getId());
+						Thread monitorThread = new Thread(new LaunchMonitorContainerRunnable(container, containerMemory));
+						
+						unMonitorNodes.remove(nodeHost);
+						
+						monitorThread.start();
+					}
 				}
 				
 			}
@@ -540,20 +592,16 @@ public class EsperApplicationMaster {
 			            + containerStatus.getDiagnostics());
 				
 				int exitStatus = containerStatus.getExitStatus();
-				int vertexId = 0;
-				for(int id : vertexContainers.keySet()){
-					if(vertexContainers.get(id).getId().getContainerId()
-							==containerStatus.getContainerId().getContainerId()){
-						vertexId = id;
-						break;
-					}
-				}
+				String containerId = containerStatus.getContainerId().toString();
+				int vertexId = containerVertex.get(containerId);
 				LOG.info("The vertex id of the completed container is " + vertexId);
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
 					//if(exitStatus==ContainerExitStatus.ABORTED){
 						// container was killed by framework, possibly preempted
 			            // we should re-try as the container was lost for some reason
 						vertexQueue.offer(dag.getVertex(vertexId));
+						containerVertex.remove(containerId);
+						launchThreads.remove(containerId);
 						numToRequest++;
 					/*}else{
 						// shell script failed
@@ -566,7 +614,7 @@ public class EsperApplicationMaster {
 					setCompleted(vertexId);
 					completedContainers.incrementAndGet();
 					LOG.info("Container completed successfully." + ", containerId="
-				              + containerStatus.getContainerId());	
+				              + containerId);	
 				}
 			}
 			
