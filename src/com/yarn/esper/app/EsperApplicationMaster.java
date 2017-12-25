@@ -358,7 +358,7 @@ public class EsperApplicationMaster {
 		// Set up resource type requirements
 		Resource capability = Resource.newInstance(containerMemory, containerVCores);
 		ContainerRequest request = new ContainerRequest(capability, null, null, pri);
-		
+
 		LOG.info("Requested container ask: " + request.toString());
 		return request;
 	}
@@ -370,8 +370,9 @@ public class EsperApplicationMaster {
 		
 		// Set up resource type requirements
 		Resource capability = Resource.newInstance(containerMemory, containerVCores);
-		ContainerRequest request = new ContainerRequest(capability, nodes, null, pri);
-		
+		ContainerRequest request = new ContainerRequest(capability, nodes, new String[]
+				{"/default-rack"}, pri);
+
 		LOG.info("Requested container ask: " + request.toString());
 		return request;
 		
@@ -567,13 +568,18 @@ public class EsperApplicationMaster {
 					launchThreads.put(container.getId().toString(), launchThread);
 					containerVertex.put(container.getId().toString(), vertexId);
 					
-					producer.produce(null, "{\"container_id\":\"" + container.getId().toString() + "\"}" );
+					JSONObject containerIdJson = new JSONObject();
+					containerIdJson.put("node_host", nodeHost);
+					containerIdJson.put("container_id", container.getId().toString());
+					producer.produce(null, containerIdJson.toString());
 					
 					launchThread.start();	
 				}else{
 					if(unMonitorNodes.size()!=0){
 						LOG.info("start monitor of node " + nodeHost + " with container " + container.getId());
-						Thread monitorThread = new Thread(new LaunchMonitorContainerRunnable(container, containerMemory));
+						Thread monitorThread = new Thread
+								(new LaunchMonitorContainerRunnable
+										(container, containerMemory, nodeHost));
 						
 						unMonitorNodes.remove(nodeHost);
 						
@@ -600,26 +606,38 @@ public class EsperApplicationMaster {
 				
 				int exitStatus = containerStatus.getExitStatus();
 				String containerId = containerStatus.getContainerId().toString();
-				int vertexId = containerVertex.get(containerId);
-				LOG.info("The vertex id of the completed container is " + vertexId);
+				
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
-					//if(exitStatus==ContainerExitStatus.ABORTED){
+					if(exitStatus==ContainerExitStatus.ABORTED){
 						// container was killed by framework, possibly preempted
 			            // we should re-try as the container was lost for some reason
-						vertexQueue.offer(dag.getVertex(vertexId));
-						containerVertex.remove(containerId);
-						launchThreads.remove(containerId);
-						numToRequest++;
-					/*}else{
+						if(containerVertex.containsKey(containerId)){
+							int vertexId = containerVertex.get(containerId);
+							vertexQueue.offer(dag.getVertex(vertexId));
+							containerVertex.remove(containerId);
+							launchThreads.remove(containerId);
+							LOG.info("The vertex id of the failed container is " + vertexId);
+							numToRequest++;
+						}	
+						
+					}else{
 						// shell script failed
 			            // counts as completed
-						setCompleted(vertexId);
-						completedContainers.incrementAndGet();
-						failedContainers.incrementAndGet();
-					}*/
+						if(containerVertex.containsKey(containerId)){
+							int vertexId = containerVertex.get(containerId);
+							LOG.info("The vertex id of the failed container is " + vertexId);
+							//setCompleted(vertexId);
+							completedContainers.incrementAndGet();
+							failedContainers.incrementAndGet();
+						}		
+					}
 				}else{
-					//setCompleted(vertexId);
-					completedContainers.incrementAndGet();
+					if(containerVertex.containsKey(containerId)){
+						completedContainers.incrementAndGet();
+						int vertexId = containerVertex.get(containerId);
+						//setCompleted(vertexId);
+						LOG.info("The vertex id of the completed container is " + vertexId);
+					}		
 					LOG.info("Container completed successfully." + ", containerId="
 				              + containerId);	
 				}
@@ -668,7 +686,7 @@ public class EsperApplicationMaster {
 			// TODO Auto-generated method stub
 			
 			LOG.info("Succeeded to start Container " + containerId);
-			if(launchedContainers.size()!=0)
+			if(launchedContainers.containsKey(containerId))
 				nmClient.getContainerStatusAsync(containerId, 
 						launchedContainers.get(containerId).getNodeId());
 			
@@ -709,8 +727,10 @@ public class EsperApplicationMaster {
 			// TODO Auto-generated method stub
 			
 			LOG.error("Failed to start Container " + containerId, arg1);
-			completedContainers.incrementAndGet();
-			failedContainers.incrementAndGet();
+			if(containerVertex.containsKey(containerId)){
+				completedContainers.incrementAndGet();
+				failedContainers.incrementAndGet();
+			}			
 			
 		}
 
@@ -830,7 +850,7 @@ public class EsperApplicationMaster {
 				c.append("\"").append(edge.getOutputVertex().getVertexName())
 				.append("\"").append(",");
 			}
-			if(v.getOutputEdges().size()==0)c.append("\"nodeend\"");
+			if(v.getOutputEdges().size()==0)c.append("\"vertexend\"");
 			c.append("]\'");
 			
 			String children = c.toString().replace("\"", "%");
@@ -842,7 +862,7 @@ public class EsperApplicationMaster {
 				p.append("\"").append(edge.getInputVertex().getVertexName())
 				.append("\"").append(",");
 			}
-			if(v.getInputEdges().size()==0)p.append("\"nodestart\"");
+			if(v.getInputEdges().size()==0)p.append("\"vertexstart\"");
 			p.append("]\'");
 			
 			String parents = p.toString().replace("\"", "%");
@@ -877,10 +897,13 @@ public class EsperApplicationMaster {
 		
 		private Container container;
 		private int allocatedMem;
+		private String nodeHost;
 		
-		public LaunchMonitorContainerRunnable(Container container, int allocatedMem) {
+		public LaunchMonitorContainerRunnable(Container container, 
+				int allocatedMem, String nodeHost) {
 			this.container = container;
 			this.allocatedMem = allocatedMem;
+			this.nodeHost = nodeHost;
 		}
 
 		@Override
@@ -908,6 +931,7 @@ public class EsperApplicationMaster {
 			
 			monitorCommands.add("--app_id " + appAttemptId.getApplicationId().toString());
 			monitorCommands.add("--allocated_mem " + allocatedMem);
+			monitorCommands.add("--node_host " + nodeHost);
 			
 			LOG.info("complete setting monitor commands:" + monitorCommands.toString());
 			
