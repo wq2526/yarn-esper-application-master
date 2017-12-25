@@ -219,6 +219,9 @@ public class EsperApplicationMaster {
 		
 		opts.addOption("esper_jar_path", true, "The esper jar path");
 		opts.addOption("esper_main_class", true, "The esper main class");
+		
+		opts.addOption("monitor_jar_path", true, "the monitor jar path");
+		opts.addOption("monitor_main_class", true, "the monitor main class");
 
 		opts.addOption("vertex_json", true, "The json of the vertex");
 		
@@ -269,7 +272,7 @@ public class EsperApplicationMaster {
 				("esper_main_class", "com.esper.kafka.adapter.EsperKafkaAdapter");
 		
 		monitorJarPath = cliParser.getOptionValue
-				("monitor_jar_path", "/usr/hadoop/monitor/container-resource-monitor.jar");
+				("monitor_jar_path", "/usr/hadoop-yarn/monitor/container-resource-monitor.jar");
 		monitorMainClass = cliParser.getOptionValue
 				("monitor_main_class", "com.container.notification.ContainerNotification");
 		
@@ -437,6 +440,7 @@ public class EsperApplicationMaster {
 			ConsumerRecords<String, String> records = consumer.consume();
 			for(ConsumerRecord<String, String> record : records){
 				String containerWarningMsg = record.value();
+				LOG.info("receive container warning msg:" + containerWarningMsg);
 				JSONObject containerWarningJson = new JSONObject(containerWarningMsg);
 				String containerId = containerWarningJson.getString("container_id");
 				int vertexId = containerVertex.get(containerId);
@@ -444,9 +448,12 @@ public class EsperApplicationMaster {
 				
 				ContainerRequest containerReuqest = setupContainerAskForRM();
 			    amRMClient.addContainerRequest(containerReuqest);
+			    totalContainers++;
 			    requestedContainers.incrementAndGet();
 			}
 		}
+		
+		producer.produce(null, "{\"finish\":\"finish\"}");
 		
 	}
 	
@@ -536,6 +543,8 @@ public class EsperApplicationMaster {
 			            + ", containerResourceVirtualCores"
 			            + container.getResource().getVirtualCores());
 				
+				launchedContainers.put(container.getId(), container);
+				
 				if(!nodes.contains(nodeHost)){
 					nodes.add(nodeHost);
 					unMonitorNodes.add(nodeHost);
@@ -543,7 +552,6 @@ public class EsperApplicationMaster {
 					
 					ContainerRequest containerReuqest = setupContainerAskForRM(new String[]{nodeHost});
 				    amRMClient.addContainerRequest(containerReuqest);
-				    requestedContainers.incrementAndGet();
 				    LOG.info("ask for a container to monitor the containers on node " + nodeHost);
 				}
 				
@@ -558,7 +566,6 @@ public class EsperApplicationMaster {
 			        // as all containers may not be allocated at one go.
 					launchThreads.put(container.getId().toString(), launchThread);
 					containerVertex.put(container.getId().toString(), vertexId);
-					launchedContainers.put(container.getId(), container);
 					
 					producer.produce(null, "{\"container_id\":\"" + container.getId().toString() + "\"}" );
 					
@@ -611,19 +618,22 @@ public class EsperApplicationMaster {
 						failedContainers.incrementAndGet();
 					}*/
 				}else{
-					setCompleted(vertexId);
+					//setCompleted(vertexId);
 					completedContainers.incrementAndGet();
 					LOG.info("Container completed successfully." + ", containerId="
 				              + containerId);	
 				}
 			}
 			
-			if(numToRequest!=0)LOG.info("ask for " + numToRequest + " containers for unsuccess vertex");
+			if(numToRequest!=0)LOG.info("ask for " + numToRequest + " containers for unsuccess containers");
 			
 			for(int i=0;i<numToRequest;i++){
 				ContainerRequest containerAsk = setupContainerAskForRM();
 		        amRMClient.addContainerRequest(containerAsk);
 			}
+			
+			requestedContainers.addAndGet(numToRequest);
+			totalContainers = totalContainers + numToRequest;
 			
 			if(completedContainers.get()==totalContainers)done = true;
 			
@@ -765,7 +775,7 @@ public class EsperApplicationMaster {
 				}
 			}*/
 			
-			waitForCompleted(vertexId);
+			//waitForCompleted(vertexId);
 			
 			LOG.info("Setting up container launch container for containerid="
 			          + container.getId());
@@ -896,7 +906,7 @@ public class EsperApplicationMaster {
 			monitorCommands.add("-Xmx" + containerMemory + "M");
 			monitorCommands.add(monitorMainClass);
 			
-			monitorCommands.add("--app_id " + appAttemptId.getApplicationId().getId());
+			monitorCommands.add("--app_id " + appAttemptId.getApplicationId().toString());
 			monitorCommands.add("--allocated_mem " + allocatedMem);
 			
 			LOG.info("complete setting monitor commands:" + monitorCommands.toString());

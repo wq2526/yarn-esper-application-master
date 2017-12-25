@@ -47,7 +47,6 @@ public class KafkaConsumerClient<K, V> {
 	
 	public ConsumerRecords<K, V> consume() {
 	    
-		LOG.info("kafka consumer start to consume");
 		ConsumerRecords<K, V> records = consumer.poll(100);
 		return records;
 		

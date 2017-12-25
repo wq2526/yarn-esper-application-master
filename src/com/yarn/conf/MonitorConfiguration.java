@@ -9,7 +9,7 @@ public class MonitorConfiguration {
 			Environment.MONITOR_LIB.toString() + "/*";
 	
 	private enum Environment {
-		MONITOR_LIB("/usr/hadoop/monitor/lib");
+		MONITOR_LIB("/usr/hadoop-yarn/monitor/lib");
 		
 		private final String variable;
 	    private Environment(String variable) {
