@@ -339,7 +339,7 @@ public class EsperApplicationMaster {
 	    // Keep looping until all the containers are launched and app
 	    // executed on them ( regardless of success/failure).
 		for(int i=0;i<totalContainers;i++){
-			ContainerRequest containerReuqest = setupContainerAskForRM();
+			ContainerRequest containerReuqest = setupContainerAskForRM(null, null, requestPriority, true);
 		    amRMClient.addContainerRequest(containerReuqest);
 		}
 		
@@ -349,29 +349,16 @@ public class EsperApplicationMaster {
 		
 	}
 	
-	//Setup the request that will be sent to the RM for the container ask.
-	private ContainerRequest setupContainerAskForRM() {
+	//Setup the request that will be sent to the RM for the container ask.	
+	private ContainerRequest setupContainerAskForRM(String[] nodes, String[] racks, int priority, boolean relaxLocality) {
 		
 		// set the priority for the request
-		Priority pri = Priority.newInstance(requestPriority);
+		Priority pri = Priority.newInstance(priority);
 		
 		// Set up resource type requirements
 		Resource capability = Resource.newInstance(containerMemory, containerVCores);
-		ContainerRequest request = new ContainerRequest(capability, null, null, pri);
-
-		LOG.info("Requested container ask: " + request.toString());
-		return request;
-	}
-	
-	private ContainerRequest setupContainerAskForRM(String[] nodes) {
-		
-		// set the priority for the request
-		Priority pri = Priority.newInstance(requestPriority);
-		
-		// Set up resource type requirements
-		Resource capability = Resource.newInstance(containerMemory, containerVCores);
-		ContainerRequest request = new ContainerRequest(capability, nodes, new String[]
-				{"/default-rack"}, pri);
+		ContainerRequest request = new ContainerRequest
+				(capability, nodes, racks, pri, relaxLocality);
 
 		LOG.info("Requested container ask: " + request.toString());
 		return request;
@@ -447,7 +434,7 @@ public class EsperApplicationMaster {
 				int vertexId = containerVertex.get(containerId);
 				vertexQueue.offer(dag.getVertex(vertexId));
 				
-				ContainerRequest containerReuqest = setupContainerAskForRM();
+				ContainerRequest containerReuqest = setupContainerAskForRM(null, null, requestPriority, true);
 			    amRMClient.addContainerRequest(containerReuqest);
 			    totalContainers++;
 			    requestedContainers.incrementAndGet();
@@ -551,7 +538,7 @@ public class EsperApplicationMaster {
 					unMonitorNodes.add(nodeHost);
 					LOG.info("add cluster node:" + nodeHost);
 					
-					ContainerRequest containerReuqest = setupContainerAskForRM(new String[]{nodeHost});
+					ContainerRequest containerReuqest = setupContainerAskForRM(new String[]{nodeHost}, new String[]{"/default-rack"}, 1, false);
 				    amRMClient.addContainerRequest(containerReuqest);
 				    LOG.info("ask for a container to monitor the containers on node " + nodeHost);
 				}
@@ -646,7 +633,7 @@ public class EsperApplicationMaster {
 			if(numToRequest!=0)LOG.info("ask for " + numToRequest + " containers for unsuccess containers");
 			
 			for(int i=0;i<numToRequest;i++){
-				ContainerRequest containerAsk = setupContainerAskForRM();
+				ContainerRequest containerAsk = setupContainerAskForRM(null, null, requestPriority, true);
 		        amRMClient.addContainerRequest(containerAsk);
 			}
 			
