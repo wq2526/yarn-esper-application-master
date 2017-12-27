@@ -104,6 +104,12 @@ public class EsperApplicationMaster {
 	
 	private String kafkaServer;
 	
+	private String dataSourceKafkaServer;
+	private String dataSourceTopics;
+	
+	private String dataDesKafkaServer;
+	private String dataDesTopics;
+	
 	// Count of failed containers
 	private AtomicInteger failedContainers;
 	// No. of containers to run shell command on
@@ -164,6 +170,12 @@ public class EsperApplicationMaster {
 		
 		monitorJarPath = "";
 		monitorMainClass = "";
+		
+		dataSourceKafkaServer = "";
+		dataSourceTopics = "";
+		
+		dataDesKafkaServer = "";
+		dataDesTopics = "";
 		
 		Properties prop = new Properties();
 		InputStream input = EsperApplicationMaster.class.
@@ -279,6 +291,11 @@ public class EsperApplicationMaster {
 		vertexJson = cliParser.getOptionValue("vertex_json", "{}")
 				.replaceAll("%", "\"").replaceAll("$", "\'");
 		LOG.info("get vertex json " + vertexJson);
+		
+		dataSourceKafkaServer = new JSONObject(vertexJson).getString("kafka_server");
+		dataSourceTopics = "\'" + new JSONObject(vertexJson).getString("kafka_topics") + "\'";
+		LOG.info("the kafka data source info: dataSourceKafkaServer[" + 
+				dataSourceKafkaServer + "], dataSourceTopics[" + dataSourceTopics + "]");
 		
 		containerMemory = Integer.parseInt(cliParser.getOptionValue("container_memory", "16"));
 		containerVCores = Integer.parseInt(cliParser.getOptionValue("container_vcores", "1"));
@@ -838,29 +855,38 @@ public class EsperApplicationMaster {
 			String outType = v.getProcessor().getOutType();
 			String vertexName = v.getVertexName();
 			
-			StringBuilder c = new StringBuilder();
-			c.append("\'[");
+			String inputServer = kafkaServer;
+			String outputServer = kafkaServer;
+			String inputTopics = "";
+			String outputTopics = "";
 			
+			StringBuilder c = new StringBuilder();
+			c.append("\'[");	
 			for(Edge edge : v.getOutputEdges()){
 				c.append("\"").append(edge.getOutputVertex().getVertexName())
 				.append("\"").append(",");
 			}
-			if(v.getOutputEdges().size()==0)c.append("\"vertexend\"");
-			c.append("]\'");
-			
+			c.append("]\'");	
 			String children = c.toString().replace("\"", "%");
+			
+			if(v.getOutputEdges().size()==0){
+				outputServer = dataDesKafkaServer;
+				outputTopics = "\'" + dataDesTopics + "\'";
+			}
 			
 			StringBuilder p = new StringBuilder();
 			p.append("\'[");
-			
 			for(Edge edge : v.getInputEdges()){
 				p.append("\"").append(edge.getInputVertex().getVertexName())
 				.append("\"").append(",");
 			}
-			if(v.getInputEdges().size()==0)p.append("\"vertexstart\"");
-			p.append("]\'");
-			
+			p.append("]\'");			
 			String parents = p.toString().replace("\"", "%");
+			
+			if(v.getInputEdges().size()==0){
+				inputServer = dataSourceKafkaServer;
+				inputTopics = "\'" + dataSourceTopics + "\'";
+			}
 			
 			// Set the necessary command to execute on the allocated container
 			List<String> esperCommands = new ArrayList<String>();
@@ -874,7 +900,10 @@ public class EsperApplicationMaster {
 			esperCommands.add("--children " + children);
 			esperCommands.add("--parents " + parents);
 			esperCommands.add("--vertex_name " + vertexName);
-			//esperCommands.add("mkdir /usr/test");
+			esperCommands.add("--input_server " + inputServer);
+			esperCommands.add("--input_topics " + inputTopics);
+			esperCommands.add("--output_server " + outputServer);
+			esperCommands.add("--output_topics " + outputTopics);
 			
 			LOG.info("Completed setting up esper engine command " + esperCommands.toString());
 			
