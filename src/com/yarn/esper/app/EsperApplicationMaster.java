@@ -143,7 +143,7 @@ public class EsperApplicationMaster {
 	private KafkaProducerClient<String, String> producer;
 	private KafkaConsumerClient<String, String> consumer;
 	
-	private boolean done;
+	private boolean done = false;
 	
 	private boolean retry = true;//used to test retry function
 	
@@ -424,20 +424,24 @@ public class EsperApplicationMaster {
 	private void listenContainerWarning() {
 		
 		consumer.subscibe();
-		while(!done){
+		while(!done && (completedContainers.get()!=totalContainers)){
 			ConsumerRecords<String, String> records = consumer.consume();
 			for(ConsumerRecord<String, String> record : records){
 				String containerWarningMsg = record.value();
 				LOG.info("receive container warning msg:" + containerWarningMsg);
 				JSONObject containerWarningJson = new JSONObject(containerWarningMsg);
 				String containerId = containerWarningJson.getString("container_id");
-				int vertexId = containerVertex.get(containerId);
-				vertexQueue.offer(dag.getVertex(vertexId));
 				
-				ContainerRequest containerReuqest = setupContainerAskForRM(null, null, requestPriority, true);
-			    amRMClient.addContainerRequest(containerReuqest);
-			    totalContainers++;
-			    requestedContainers.incrementAndGet();
+				if(containerVertex.containsKey(containerId)){
+					int vertexId = containerVertex.get(containerId);
+					vertexQueue.offer(dag.getVertex(vertexId));
+					
+					ContainerRequest containerReuqest = setupContainerAskForRM(null, null, requestPriority, true);
+				    amRMClient.addContainerRequest(containerReuqest);
+				    totalContainers++;
+				    requestedContainers.incrementAndGet();
+				}
+				
 			}
 		}
 		
@@ -516,7 +520,7 @@ public class EsperApplicationMaster {
 		@Override
 		public void onContainersAllocated(List<Container> containers) {
 			// TODO Auto-generated method stub
-			LOG.info("Got response from RM for container ask, allocatedCnt="
+			LOG.info("Got container allocated response from RM for container ask, allocatedCnt="
 			          + containers.size());
 			allocatedContainers.addAndGet(containers.size());
 			for(Container container : containers){
@@ -533,7 +537,7 @@ public class EsperApplicationMaster {
 				
 				launchedContainers.put(container.getId(), container);
 				
-				if(!nodes.contains(nodeHost)){
+				if(!nodes.contains(nodeHost) && !vertexQueue.isEmpty()){
 					nodes.add(nodeHost);
 					unMonitorNodes.add(nodeHost);
 					LOG.info("add cluster node:" + nodeHost);
@@ -555,12 +559,8 @@ public class EsperApplicationMaster {
 					launchThreads.put(container.getId().toString(), launchThread);
 					containerVertex.put(container.getId().toString(), vertexId);
 					
-					JSONObject containerIdJson = new JSONObject();
-					containerIdJson.put("node_host", nodeHost);
-					containerIdJson.put("container_id", container.getId().toString());
-					producer.produce(null, containerIdJson.toString());
-					
-					launchThread.start();	
+					launchThread.start();
+						
 				}else{
 					if(unMonitorNodes.size()!=0){
 						LOG.info("start monitor of node " + nodeHost + " with container " + container.getId());
@@ -580,7 +580,7 @@ public class EsperApplicationMaster {
 		@Override
 		public void onContainersCompleted(List<ContainerStatus> containerStatuses) {
 			// TODO Auto-generated method stub
-			LOG.info("Got response from RM for container ask, completedCnt="
+			LOG.info("Got container completed response from RM for container ask, completedCnt="
 			          + containerStatuses.size());
 			
 			int numToRequest = 0;
@@ -673,9 +673,17 @@ public class EsperApplicationMaster {
 			// TODO Auto-generated method stub
 			
 			LOG.info("Succeeded to start Container " + containerId);
-			if(launchedContainers.containsKey(containerId))
-				nmClient.getContainerStatusAsync(containerId, 
-						launchedContainers.get(containerId).getNodeId());
+			if(launchedContainers.containsKey(containerId)){
+				Container container = launchedContainers.get(containerId);
+				
+				nmClient.getContainerStatusAsync(containerId, container.getNodeId());
+				
+				JSONObject containerIdJson = new JSONObject();
+				containerIdJson.put("node_host", container.getNodeId().getHost());
+				containerIdJson.put("container_id", container.getId().toString());
+				LOG.info("send container id message:" + containerIdJson.toString());
+				producer.produce(null, containerIdJson.toString());
+			}			
 			
 		}
 
