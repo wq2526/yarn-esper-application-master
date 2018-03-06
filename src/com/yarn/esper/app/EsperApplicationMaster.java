@@ -292,10 +292,15 @@ public class EsperApplicationMaster {
 				.replaceAll("%", "\"").replaceAll("$", "\'");
 		LOG.info("get vertex json " + vertexJson);
 		
-		dataSourceKafkaServer = new JSONObject(vertexJson).getString("kafka_server");
-		dataSourceTopics = "\'" + new JSONObject(vertexJson).getString("kafka_topics") + "\'";
+		dataSourceKafkaServer = new JSONObject(vertexJson).getString("kafka_input_server");
+		dataSourceTopics = "\'" + new JSONObject(vertexJson).getString("kafka_input_topics") + "\'";
 		LOG.info("the kafka data source info: dataSourceKafkaServer[" + 
 				dataSourceKafkaServer + "], dataSourceTopics[" + dataSourceTopics + "]");
+		
+		dataDesKafkaServer = new JSONObject(vertexJson).getString("kafka_output_server");
+		dataDesTopics = "\'" + new JSONObject(vertexJson).getString("kafka_output_topics") + "\'";
+		LOG.info("the kafka data des info: dataDesKafkaServer[" + 
+				dataDesKafkaServer + "], dataDesTopics[" + dataDesTopics + "]");
 		
 		containerMemory = Integer.parseInt(cliParser.getOptionValue("container_memory", "16"));
 		containerVCores = Integer.parseInt(cliParser.getOptionValue("container_vcores", "1"));
@@ -710,11 +715,11 @@ public class EsperApplicationMaster {
 			
 			LOG.info("Container Status: id=" + containerId + ", status=" +
 		            containerStatus);
-			/*if(retry){
+			if(retry){
 				nmClient.stopContainerAsync(containerId, 
 						launchedContainers.get(containerId).getNodeId());
 				retry = false;
-			}*/
+			}
 			
 		}
 
