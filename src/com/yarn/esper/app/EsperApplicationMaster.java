@@ -151,7 +151,7 @@ public class EsperApplicationMaster {
 	
 	private boolean done = false;
 	
-	private boolean retry = true;//used to test retry function
+	private boolean retry = false;//used to test retry function
 	
 	public EsperApplicationMaster() {
 		conf = new YarnConfiguration();
@@ -467,7 +467,7 @@ public class EsperApplicationMaster {
 			}
 		}
 		
-		producer.produce(null, "{\"finish\":\"finish\"}");
+		//producer.produce(null, "{\"finish\":\"finish\"}");
 		
 	}
 	
@@ -617,7 +617,7 @@ public class EsperApplicationMaster {
 				String containerId = containerStatus.getContainerId().toString();
 				
 				if(exitStatus!=ContainerExitStatus.SUCCESS){
-					if(exitStatus==ContainerExitStatus.ABORTED){
+					//if(exitStatus==ContainerExitStatus.ABORTED){
 						// container was killed by framework, possibly preempted
 			            // we should re-try as the container was lost for some reason
 						if(containerVertex.containsKey(containerId)){
@@ -629,7 +629,7 @@ public class EsperApplicationMaster {
 							numToRequest++;
 						}	
 						
-					}else{
+					/*}else{
 						// shell script failed
 			            // counts as completed
 						if(containerVertex.containsKey(containerId)){
@@ -638,8 +638,8 @@ public class EsperApplicationMaster {
 							//setCompleted(vertexId);
 							completedContainers.incrementAndGet();
 							failedContainers.incrementAndGet();
-						}		
-					}
+						}	*/	
+					//}
 				}else{
 					if(containerVertex.containsKey(containerId)){
 						completedContainers.incrementAndGet();
@@ -703,6 +703,7 @@ public class EsperApplicationMaster {
 				JSONObject containerIdJson = new JSONObject();
 				containerIdJson.put("node_host", container.getNodeId().getHost());
 				containerIdJson.put("container_id", container.getId().toString());
+				containerIdJson.put("container_memory", containerMemory + "");
 				LOG.info("send container id message:" + containerIdJson.toString());
 				producer.produce(null, containerIdJson.toString());
 			}			
@@ -715,6 +716,12 @@ public class EsperApplicationMaster {
 			
 			LOG.info("Container Status: id=" + containerId + ", status=" +
 		            containerStatus);
+			try {
+				Thread.sleep(1000);
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				LOG.error(e);
+			}
 			if(retry){
 				nmClient.stopContainerAsync(containerId, 
 						launchedContainers.get(containerId).getNodeId());
@@ -862,8 +869,8 @@ public class EsperApplicationMaster {
 			
 			String inputServer = kafkaServer;
 			String outputServer = kafkaServer;
-			String inputTopics = "";
-			String outputTopics = "";
+			String inputTopics = dataSourceTopics;
+			String outputTopics = dataDesTopics;
 			
 			StringBuilder c = new StringBuilder();
 			c.append("\'[");	
@@ -876,7 +883,6 @@ public class EsperApplicationMaster {
 			
 			if(v.getOutputEdges().size()==0){
 				outputServer = dataDesKafkaServer;
-				outputTopics = "\'" + dataDesTopics + "\'";
 			}
 			
 			StringBuilder p = new StringBuilder();
@@ -890,7 +896,6 @@ public class EsperApplicationMaster {
 			
 			if(v.getInputEdges().size()==0){
 				inputServer = dataSourceKafkaServer;
-				inputTopics = "\'" + dataSourceTopics + "\'";
 			}
 			
 			// Set the necessary command to execute on the allocated container
